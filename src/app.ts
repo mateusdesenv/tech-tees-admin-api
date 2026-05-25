@@ -1,10 +1,13 @@
 import { createServer } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readJson, sendEmpty, sendError, sendJson } from './http-utils.js';
 import type { ProductInput } from './product-contract.js';
 import type { ProductsService } from './products-service.js';
 
-export function createApp(productsService: ProductsService) {
-  return createServer(async (request, response) => {
+type ProductsServiceProvider = ProductsService | (() => ProductsService | Promise<ProductsService>);
+
+export function createRequestHandler(productsServiceProvider: ProductsServiceProvider) {
+  return async (request: IncomingMessage, response: ServerResponse) => {
     try {
       const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
       const segments = url.pathname.split('/').filter(Boolean);
@@ -20,6 +23,8 @@ export function createApp(productsService: ProductsService) {
       if (segments[0] !== 'products') {
         return sendJson(response, 404, { error: 'Rota não encontrada.' });
       }
+
+      const productsService = await resolveProductsService(productsServiceProvider);
 
       if (segments.length === 1) {
         if (request.method === 'GET') {
@@ -93,5 +98,17 @@ export function createApp(productsService: ProductsService) {
     } catch (error) {
       return sendError(response, error);
     }
-  });
+  };
+}
+
+export function createApp(productsService: ProductsService) {
+  return createServer(createRequestHandler(productsService));
+}
+
+async function resolveProductsService(provider: ProductsServiceProvider): Promise<ProductsService> {
+  if (typeof provider === 'function') {
+    return provider();
+  }
+
+  return provider;
 }

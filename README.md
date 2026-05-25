@@ -23,6 +23,23 @@ npm start
 
 Por padrao, a API sobe em `http://127.0.0.1:3000` e usa `mongodb://127.0.0.1:27017`.
 
+## Deploy na Vercel
+
+O projeto inclui `api/index.ts` e `vercel.json` para publicar os endpoints na raiz do dominio, por exemplo:
+
+```txt
+https://tech-tees-admin-api.vercel.app/health
+https://tech-tees-admin-api.vercel.app/products
+```
+
+Configure estas variaveis no painel da Vercel:
+
+- `MONGODB_URI`
+- `MONGODB_DB`
+- `MONGODB_COLLECTION`
+
+O Atlas tambem precisa permitir conexoes vindas da Vercel em Network Access.
+
 Variaveis disponiveis:
 
 - `PORT`: porta HTTP.
