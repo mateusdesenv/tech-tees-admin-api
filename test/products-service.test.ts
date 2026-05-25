@@ -33,6 +33,15 @@ test('cria produto normalizado e insere no início da lista', async () => {
   assert.deepEqual(product.tags, ['dev', 'café']);
   assert.equal(product.rating, 5);
   assert.equal(product.color, 'Preta');
+
+  const productWithStringBoolean = await service.create({
+    name: 'Camiseta Boolean',
+    slug: 'camiseta-boolean',
+    sku: 'TT-BOOL-001',
+    featured: 'false',
+  });
+
+  assert.equal(productWithStringBoolean.featured, false);
 });
 
 test('duplica produto seguindo o contrato do admin', async () => {
@@ -52,7 +61,7 @@ test('duplica produto seguindo o contrato do admin', async () => {
   assert.notEqual(duplicated.id, product.id);
   assert.equal(duplicated.name, 'Camiseta Terminal - Cópia');
   assert.match(duplicated.slug, /^camiseta-terminal-copia-\d+$/);
-  assert.equal(duplicated.sku, 'TT-DEV-999-COPY');
+  assert.match(duplicated.sku, /^TT-DEV-999-COPY-\d+$/);
   assert.equal(duplicated.status, 'draft');
   assert.equal(duplicated.sales, 0);
 });

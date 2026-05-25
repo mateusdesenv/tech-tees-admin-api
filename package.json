@@ -1,13 +1,13 @@
 {
   "name": "tech-tees-admin-api",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --import tsx src/server.ts",
-    "dev:watch": "tsx watch src/server.ts",
+    "dev": "node --env-file=.env --import tsx src/server.ts",
+    "dev:watch": "node --env-file=.env --watch --import tsx src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "node dist/src/server.js",
     "test": "node --test --import tsx \"test/**/*.test.ts\""
   },
   "dependencies": {

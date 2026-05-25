@@ -9,6 +9,8 @@ import type { Product, ProductInput, ProductsExport } from './product-contract.j
 import type { ProductRepository } from './product-repository.js';
 import { createSeedProducts } from './seeds.js';
 
+const DEFAULT_MAX_IMPORT_PRODUCTS = 1000;
+
 export class ProductsService {
   private readonly repository: ProductRepository;
 
@@ -26,6 +28,7 @@ export class ProductsService {
 
   async create(payload: ProductInput): Promise<Product> {
     const product = normalizeProduct(payload);
+    await this.assertUniqueProductFields(product);
 
     await this.repository.insertAtTop(product);
     return product;
@@ -39,6 +42,7 @@ export class ProductsService {
     }
 
     const updated = normalizeProduct({ ...payload, id }, existing);
+    await this.assertUniqueProductFields(updated, id);
     await this.repository.replace(id, updated);
 
     return updated;
@@ -52,6 +56,7 @@ export class ProductsService {
     }
 
     const updated = normalizeProduct({ ...existing, ...payload, id }, existing);
+    await this.assertUniqueProductFields(updated, id);
     await this.repository.replace(id, updated);
 
     return updated;
@@ -69,6 +74,7 @@ export class ProductsService {
     }
 
     const duplicated = duplicateProduct(product);
+    await this.assertUniqueProductFields(duplicated);
     await this.repository.insertAtTop(duplicated);
 
     return duplicated;
@@ -89,6 +95,7 @@ export class ProductsService {
 
   async resetSeed(): Promise<Product[]> {
     const products = createSeedProducts();
+    this.assertUniqueProductList(products);
     await this.repository.replaceAll(products);
     return products;
   }
@@ -112,11 +119,64 @@ export class ProductsService {
       throw new HttpError('Envie um array de produtos ou um envelope com "products".', 400);
     }
 
+    const maxImportProducts = Number(process.env.MAX_IMPORT_PRODUCTS || DEFAULT_MAX_IMPORT_PRODUCTS);
+    if (products.length > maxImportProducts) {
+      throw new HttpError(`Importação excede o limite de ${maxImportProducts} produtos.`, 413);
+    }
+
     const normalizedProducts = products.map((product) =>
       validateImportedProduct(product as ProductInput),
     );
+
+    this.assertUniqueProductList(normalizedProducts);
     await this.repository.replaceAll(normalizedProducts);
 
     return normalizedProducts;
+  }
+
+  private async assertUniqueProductFields(product: Product, ignoredId = ''): Promise<void> {
+    const products = await this.repository.list();
+    const duplicated = products.find((item) =>
+      item.id !== ignoredId
+      && (
+        item.id === product.id
+        || item.slug === product.slug
+        || item.sku === product.sku
+      ),
+    );
+
+    if (!duplicated) {
+      return;
+    }
+
+    if (duplicated.id === product.id) {
+      throw new HttpError(`Já existe um produto com o id "${product.id}".`, 409);
+    }
+
+    if (duplicated.slug === product.slug) {
+      throw new HttpError(`Já existe um produto com o slug "${product.slug}".`, 409);
+    }
+
+    throw new HttpError(`Já existe um produto com o SKU "${product.sku}".`, 409);
+  }
+
+  private assertUniqueProductList(products: Product[]): void {
+    this.assertUniqueValues(products, 'id');
+    this.assertUniqueValues(products, 'slug');
+    this.assertUniqueValues(products, 'sku');
+  }
+
+  private assertUniqueValues(products: Product[], field: 'id' | 'slug' | 'sku'): void {
+    const seen = new Set<string>();
+
+    for (const product of products) {
+      const value = product[field];
+
+      if (seen.has(value)) {
+        throw new HttpError(`Importação inválida: valor duplicado no campo "${field}": "${value}".`, 400);
+      }
+
+      seen.add(value);
+    }
   }
 }

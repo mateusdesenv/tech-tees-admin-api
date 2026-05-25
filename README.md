@@ -5,54 +5,104 @@ API HTTP em TypeScript para substituir o `localStorage` do admin de camisetas ma
 ## Requisitos
 
 - Node.js 20+
-- MongoDB
+- MongoDB local ou MongoDB Atlas
 
-## Rodando
+## Rodando localmente
 
 ```bash
-npm install
+npm ci
+cp .env.example .env
 npm run dev
 ```
 
-Para rodar a versao compilada:
+Por padrão, a API sobe em:
 
-```bash
-npm run build
-npm start
+```txt
+http://127.0.0.1:3000
 ```
 
-Por padrao, a API sobe em `http://127.0.0.1:3000` e usa `mongodb://127.0.0.1:27017`.
+Health check:
+
+```bash
+curl http://127.0.0.1:3000/health
+```
+
+Se `ADMIN_API_TOKEN` estiver configurado, os endpoints de `/products` exigem autenticação:
+
+```bash
+curl http://127.0.0.1:3000/products \
+  -H "Authorization: Bearer SEU_TOKEN"
+```
+
+Também é aceito:
+
+```bash
+curl http://127.0.0.1:3000/products \
+  -H "X-Admin-Token: SEU_TOKEN"
+```
+
+## Scripts
+
+```bash
+npm run dev        # servidor local em TypeScript
+npm run dev:watch  # servidor local com watch
+npm run build      # compila para dist/
+npm start          # roda a versão compilada
+npm test           # executa testes
+```
 
 ## Deploy na Vercel
 
-O projeto inclui `api/index.ts` e `vercel.json` para publicar os endpoints na raiz do dominio, por exemplo:
+O projeto já possui:
 
 ```txt
-https://tech-tees-admin-api.vercel.app/health
-https://tech-tees-admin-api.vercel.app/products
+api/index.ts
+vercel.json
 ```
 
-Configure estas variaveis no painel da Vercel:
+A Vercel deve publicar os endpoints na raiz do domínio:
 
-- `MONGODB_URI`
-- `MONGODB_DB`
-- `MONGODB_COLLECTION`
-
-O Atlas tambem precisa permitir conexoes vindas da Vercel em Network Access.
-
-Variaveis disponiveis:
-
-- `PORT`: porta HTTP.
-- `HOST`: host HTTP. Padrao: `127.0.0.1`.
-- `MONGODB_URI`: URI de conexao com MongoDB. Padrao: `mongodb://127.0.0.1:27017`.
-- `MONGODB_DB`: banco de dados. Padrao: `tech-tees-admin`.
-- `MONGODB_COLLECTION`: colecao de produtos. Padrao: `products`.
-
-Exemplo:
-
-```bash
-MONGODB_URI="mongodb://127.0.0.1:27017" npm run dev
+```txt
+https://sua-api.vercel.app/health
+https://sua-api.vercel.app/products
 ```
+
+Configuração recomendada na Vercel:
+
+- Framework Preset: `Other`
+- Install Command: `npm ci`
+- Build Command: `npm run build`
+- Output Directory: vazio
+
+## Variáveis de ambiente
+
+Configure estas variáveis na Vercel:
+
+```txt
+MONGODB_URI=mongodb+srv://USUARIO:SENHA@cluster.mongodb.net/?retryWrites=true&w=majority
+MONGODB_DB=tech-tees-admin
+MONGODB_COLLECTION=products
+ADMIN_API_TOKEN=gere-um-token-forte-aqui
+CORS_ORIGIN=https://url-do-admin.vercel.app
+```
+
+Variáveis opcionais:
+
+```txt
+PORT=3000
+HOST=127.0.0.1
+AUTO_SEED=true
+MAX_BODY_BYTES=1000000
+MAX_IMPORT_PRODUCTS=1000
+```
+
+### Observações importantes
+
+- Em produção/Vercel, `ADMIN_API_TOKEN` é obrigatório para acessar `/products`.
+- `GET /health` não exige token.
+- `CORS_ORIGIN` aceita uma ou mais origens separadas por vírgula.
+- `AUTO_SEED=false` impede a API de recriar o produto seed quando a coleção estiver vazia.
+- `MAX_BODY_BYTES` limita o tamanho do JSON recebido. A recomendação é não enviar imagens grandes em base64.
 
 ## Endpoints
 
@@ -69,5 +119,26 @@ MONGODB_URI="mongodb://127.0.0.1:27017" npm run dev
 - `POST /products/:id/duplicate`
 - `PATCH /products/:id/status`
 
-Os payloads preservam os campos descritos em `docs/localstorage-contracts.md` do frontend.
-# tech-tees-admin-api
+## Segurança aplicada nesta versão
+
+- Token administrativo via `Authorization: Bearer <token>` ou `X-Admin-Token`.
+- CORS configurável por ambiente.
+- Limite de tamanho do body JSON.
+- Validação contra números negativos em preço, custo, estoque e vendas.
+- Correção do bug `Boolean('false') === true`.
+- Validação de duplicidade em `id`, `slug` e `sku` antes de criar/importar produtos.
+- Correção do script `npm start` para `dist/src/server.js`.
+
+## Contrato de importação/exportação
+
+Exportação:
+
+```json
+{
+  "version": 1,
+  "exportedAt": "2026-05-24T12:00:00.000Z",
+  "products": []
+}
+```
+
+Importação aceita tanto o envelope acima quanto um array puro de produtos.

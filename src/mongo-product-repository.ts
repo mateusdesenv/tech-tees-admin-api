@@ -18,6 +18,7 @@ export class MongoProductRepository implements ProductRepository {
     uri: string;
     dbName: string;
     collectionName: string;
+    autoSeed: boolean;
   }): Promise<{ repository: MongoProductRepository; client: MongoClient }> {
     const client = new MongoClient(options.uri);
     await client.connect();
@@ -27,10 +28,15 @@ export class MongoProductRepository implements ProductRepository {
       .collection<ProductDocument>(options.collectionName);
 
     await collection.createIndex({ id: 1 }, { unique: true });
+    await collection.createIndex({ slug: 1 });
+    await collection.createIndex({ sku: 1 });
     await collection.createIndex({ position: -1 });
 
     const repository = new MongoProductRepository(collection);
-    await repository.seedIfEmpty();
+
+    if (options.autoSeed) {
+      await repository.seedIfEmpty();
+    }
 
     return { repository, client };
   }

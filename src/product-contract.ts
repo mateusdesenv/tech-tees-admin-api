@@ -78,6 +78,10 @@ export function generateId(): string {
 }
 
 export function toNumber(value: unknown, fallback = 0): number {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
@@ -103,6 +107,30 @@ export function toStringArray(value: unknown): string[] {
   return [];
 }
 
+export function toBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return value === 1;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+
+    if (['true', '1', 'yes', 'sim', 's'].includes(normalized)) {
+      return true;
+    }
+
+    if (['false', '0', 'no', 'nao', 'não', 'n'].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
 export function normalizeProduct(
   input: ProductInput,
   existingProduct: Product | null = null,
@@ -125,17 +153,28 @@ export function normalizeProduct(
   }
 
   const slugInput = String(input?.slug ?? '').trim();
+  const slug = slugInput || createSlug(name);
+
+  if (!slug) {
+    throw validationError('Não foi possível gerar um slug válido para o produto.');
+  }
+
+  const price = readNonNegativeNumber(input?.price, 'price', 0);
+  const compareAtPrice = readNullableNonNegativeNumber(input?.compareAtPrice, 'compareAtPrice');
+  const cost = readNullableNonNegativeNumber(input?.cost, 'cost');
+  const stock = readNonNegativeInteger(input?.stock, 'stock', 0);
+  const sales = readNonNegativeInteger(input?.sales, 'sales', 0);
   const rating = Math.min(5, Math.max(0, toNumber(input?.rating, 0)));
 
   return {
     id: String(existingProduct?.id ?? input?.id ?? generateId()),
     name,
-    slug: slugInput || createSlug(name),
+    slug,
     category,
-    price: toNumber(input?.price, 0),
-    compareAtPrice: toNullableNumber(input?.compareAtPrice),
-    cost: toNullableNumber(input?.cost),
-    stock: toNumber(input?.stock, 0),
+    price,
+    compareAtPrice,
+    cost,
+    stock,
     sku: String(input?.sku ?? '').trim() || generateSku(),
     color: String(input?.color ?? '').trim() || DEFAULT_COLOR,
     sizes: toStringArray(input?.sizes),
@@ -143,8 +182,8 @@ export function normalizeProduct(
     description: String(input?.description ?? '').trim(),
     tags: toStringArray(input?.tags),
     rating,
-    sales: toNumber(input?.sales, 0),
-    featured: Boolean(input?.featured),
+    sales,
+    featured: toBoolean(input?.featured, existingProduct?.featured ?? false),
     status,
     createdAt: existingProduct?.createdAt ?? String(input?.createdAt ?? now),
     updatedAt: now,
@@ -167,13 +206,14 @@ export function validateImportedProduct(input: ProductInput): Product {
 
 export function duplicateProduct(product: Product): Product {
   const now = new Date().toISOString();
+  const suffix = Date.now();
 
   return {
     ...product,
     id: generateId(),
     name: `${product.name} - Cópia`,
-    slug: `${product.slug}-copia-${Date.now()}`,
-    sku: `${product.sku}-COPY`,
+    slug: `${product.slug}-copia-${suffix}`,
+    sku: `${product.sku}-COPY-${String(suffix).slice(-6)}`,
     status: 'draft' as const,
     sales: 0,
     createdAt: now,
@@ -191,6 +231,36 @@ export function toggleStatus(product: Product): Product {
 
 export function validationError(message: string): HttpError {
   return new HttpError(message, 400);
+}
+
+function readNonNegativeNumber(value: unknown, field: string, fallback: number): number {
+  const number = toNumber(value, fallback);
+
+  if (number < 0) {
+    throw validationError(`O campo "${field}" não pode ser negativo.`);
+  }
+
+  return number;
+}
+
+function readNullableNonNegativeNumber(value: unknown, field: string): number | null {
+  const number = toNullableNumber(value);
+
+  if (number !== null && number < 0) {
+    throw validationError(`O campo "${field}" não pode ser negativo.`);
+  }
+
+  return number;
+}
+
+function readNonNegativeInteger(value: unknown, field: string, fallback: number): number {
+  const number = readNonNegativeNumber(value, field, fallback);
+
+  if (!Number.isInteger(number)) {
+    throw validationError(`O campo "${field}" precisa ser um número inteiro.`);
+  }
+
+  return number;
 }
 
 function isProductCategory(value: unknown): value is ProductCategory {

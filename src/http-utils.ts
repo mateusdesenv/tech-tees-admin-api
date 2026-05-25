@@ -1,11 +1,27 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { HttpError } from './product-contract.js';
 
+const DEFAULT_MAX_BODY_BYTES = 1_000_000;
+
 export async function readJson(request: IncomingMessage): Promise<unknown> {
+  const maxBodyBytes = Number(process.env.MAX_BODY_BYTES || DEFAULT_MAX_BODY_BYTES);
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  const contentLength = Number(request.headers['content-length'] || 0);
+  if (contentLength > maxBodyBytes) {
+    throw new HttpError(`Payload muito grande. Limite atual: ${maxBodyBytes} bytes.`, 413);
+  }
 
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+
+    if (totalBytes > maxBodyBytes) {
+      throw new HttpError(`Payload muito grande. Limite atual: ${maxBodyBytes} bytes.`, 413);
+    }
+
+    chunks.push(buffer);
   }
 
   const raw = Buffer.concat(chunks).toString('utf8');
@@ -21,26 +37,29 @@ export async function readJson(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-export function sendJson(response: ServerResponse, statusCode: number, body: unknown): void {
+export function sendJson(
+  response: ServerResponse,
+  statusCode: number,
+  body: unknown,
+  request?: IncomingMessage,
+): void {
   response.writeHead(statusCode, {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    ...createCorsHeaders(request),
     'Content-Type': 'application/json; charset=utf-8',
   });
   response.end(JSON.stringify(body));
 }
 
-export function sendEmpty(response: ServerResponse, statusCode: number): void {
-  response.writeHead(statusCode, {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-  });
+export function sendEmpty(
+  response: ServerResponse,
+  statusCode: number,
+  request?: IncomingMessage,
+): void {
+  response.writeHead(statusCode, createCorsHeaders(request));
   response.end();
 }
 
-export function sendError(response: ServerResponse, error: unknown): void {
+export function sendError(response: ServerResponse, error: unknown, request?: IncomingMessage): void {
   const statusCode = error instanceof HttpError ? error.statusCode : 500;
   const message = statusCode === 500
     ? 'Erro interno do servidor.'
@@ -48,5 +67,29 @@ export function sendError(response: ServerResponse, error: unknown): void {
       ? error.message
       : 'Erro inesperado.';
 
-  sendJson(response, statusCode, { error: message });
+  sendJson(response, statusCode, { error: message }, request);
+}
+
+function createCorsHeaders(request?: IncomingMessage): Record<string, string> {
+  const requestOrigin = request?.headers.origin;
+  const configuredOrigins = String(process.env.CORS_ORIGIN || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  let allowOrigin = '*';
+
+  if (configuredOrigins.length > 0) {
+    allowOrigin = requestOrigin && configuredOrigins.includes(requestOrigin)
+      ? requestOrigin
+      : configuredOrigins[0];
+  }
+
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Token',
+    'Access-Control-Max-Age': '86400',
+    Vary: 'Origin',
+  };
 }
