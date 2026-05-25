@@ -14,6 +14,10 @@ export async function getProductsService(): Promise<ProductsService> {
   return connection.service;
 }
 
+export function getProductsServiceLazy(): Promise<ProductsService> {
+  return getProductsService();
+}
+
 export async function closeProductsServiceConnection(): Promise<void> {
   if (!connectionPromise) {
     return;

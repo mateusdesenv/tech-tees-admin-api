@@ -1,7 +1,4 @@
-// Vercel compiles TypeScript functions directly and resolves these source imports.
-// @ts-expect-error TS NodeNext wants emitted .js paths, which break Vercel source bundling here.
-import { createRequestHandler } from '../src/app';
-// @ts-expect-error TS NodeNext wants emitted .js paths, which break Vercel source bundling here.
-import { getProductsService } from '../src/products-service-factory';
+import { createRequestHandler } from '../src/app.js';
+import { getProductsServiceLazy } from '../src/products-service-factory.js';
 
-export default createRequestHandler(getProductsService);
+export default createRequestHandler(getProductsServiceLazy);

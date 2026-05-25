@@ -101,8 +101,8 @@ export function createRequestHandler(productsServiceProvider: ProductsServicePro
   };
 }
 
-export function createApp(productsService: ProductsService) {
-  return createServer(createRequestHandler(productsService));
+export function createApp(productsServiceProvider: ProductsServiceProvider) {
+  return createServer(createRequestHandler(productsServiceProvider));
 }
 
 async function resolveProductsService(provider: ProductsServiceProvider): Promise<ProductsService> {
