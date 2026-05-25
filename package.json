@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --env-file=.env --import tsx src/server.ts",
-    "dev:watch": "node --env-file=.env --watch --import tsx src/server.ts",
+    "dev": "node --env-file=.env scripts/local-api.mjs",
+    "dev:watch": "node --env-file=.env --watch scripts/local-api.mjs",
     "build": "tsc",
-    "start": "node dist/src/server.js",
+    "start": "node scripts/local-api.mjs",
     "test": "node --test --import tsx \"test/**/*.test.ts\"",
     "vercel-build": "npm run build"
   },

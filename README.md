@@ -27,18 +27,20 @@ Health check:
 curl http://127.0.0.1:3000/health
 ```
 
-Se `ADMIN_API_TOKEN` estiver configurado, os endpoints de `/products` exigem autenticação:
+Crie uma conta administrativa e use o token retornado para as ações de escrita:
 
 ```bash
-curl http://127.0.0.1:3000/products \
-  -H "Authorization: Bearer SEU_TOKEN"
+curl -X POST http://127.0.0.1:3000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Admin","email":"admin@techtees.com","password":"senha123"}'
 ```
 
-Também é aceito:
+Login:
 
 ```bash
-curl http://127.0.0.1:3000/products \
-  -H "X-Admin-Token: SEU_TOKEN"
+curl -X POST http://127.0.0.1:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@techtees.com","password":"senha123"}'
 ```
 
 ## Scripts
@@ -56,7 +58,7 @@ npm test           # executa testes
 O projeto já possui:
 
 ```txt
-api/index.ts
+api/index.js
 vercel.json
 ```
 
@@ -82,7 +84,8 @@ Configure estas variáveis na Vercel:
 MONGODB_URI=mongodb+srv://USUARIO:SENHA@cluster.mongodb.net/?retryWrites=true&w=majority
 MONGODB_DB=tech-tees-admin
 MONGODB_COLLECTION=products
-ADMIN_API_TOKEN=gere-um-token-forte-aqui
+MONGODB_USERS_COLLECTION=users
+AUTH_SECRET=gere-um-segredo-forte-aqui
 CORS_ORIGIN=https://url-do-admin.vercel.app
 ```
 
@@ -98,7 +101,8 @@ MAX_IMPORT_PRODUCTS=1000
 
 ### Observações importantes
 
-- Em produção/Vercel, `ADMIN_API_TOKEN` é obrigatório para acessar `/products`.
+- `GET /products` é público para o e-commerce.
+- Criar, editar, excluir, importar, exportar, duplicar e alterar status exigem `Authorization: Bearer <token>`.
 - `GET /health` não exige token.
 - `CORS_ORIGIN` aceita uma ou mais origens separadas por vírgula.
 - `AUTO_SEED=false` impede a API de recriar o produto seed quando a coleção estiver vazia.
@@ -107,6 +111,9 @@ MAX_IMPORT_PRODUCTS=1000
 ## Endpoints
 
 - `GET /health`
+- `POST /auth/register`
+- `POST /auth/login`
+- `GET /auth/me`
 - `GET /products`
 - `POST /products`
 - `GET /products/export`
@@ -121,7 +128,8 @@ MAX_IMPORT_PRODUCTS=1000
 
 ## Segurança aplicada nesta versão
 
-- Token administrativo via `Authorization: Bearer <token>` ou `X-Admin-Token`.
+- Login/cadastro com senha hasheada usando PBKDF2.
+- Token assinado via `Authorization: Bearer <token>`.
 - CORS configurável por ambiente.
 - Limite de tamanho do body JSON.
 - Validação contra números negativos em preço, custo, estoque e vendas.
