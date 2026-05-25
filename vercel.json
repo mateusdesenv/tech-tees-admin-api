@@ -1,16 +1,10 @@
 {
   "version": 2,
-  "buildCommand": "npm run build",
-  "builds": [
+  "rewrites": [
     {
-      "src": "api/index.cjs",
-      "use": "@vercel/node"
+      "source": "/(.*)",
+      "destination": "/api/index"
     }
   ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "/api/index.cjs"
-    }
-  ]
+  "buildCommand": "npm run build"
 }

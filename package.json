@@ -1,6 +1,6 @@
 {
   "name": "tech-tees-admin-api",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,8 @@
     "dev:watch": "node --env-file=.env --watch --import tsx src/server.ts",
     "build": "tsc",
     "start": "node dist/src/server.js",
-    "test": "node --test --import tsx \"test/**/*.test.ts\""
+    "test": "node --test --import tsx \"test/**/*.test.ts\"",
+    "vercel-build": "npm run build"
   },
   "dependencies": {
     "mongodb": "^6.16.0"
