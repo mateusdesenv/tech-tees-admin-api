@@ -1,6 +1,5 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { assertAdminAuthorized } from './auth.js';
 import { readJson, sendEmpty, sendError, sendJson } from './http-utils.js';
 import type { ProductInput } from './product-contract.js';
 import type { ProductsService } from './products-service.js';
@@ -24,8 +23,6 @@ export function createRequestHandler(productsServiceProvider: ProductsServicePro
       if (segments[0] !== 'products') {
         return sendJson(response, 404, { error: 'Rota não encontrada.' }, request);
       }
-
-      assertAdminAuthorized(request);
 
       const productsService = await resolveProductsService(productsServiceProvider);
 
