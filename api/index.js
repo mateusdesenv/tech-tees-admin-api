@@ -26,6 +26,10 @@ export default async function handler(request, response) {
       return handleAuthRoutes(request, response, segments);
     }
 
+    if (segments[0] === 'stores') {
+      return handleStoreRoutes(request, response, segments);
+    }
+
     if (segments[0] !== 'products') {
       return sendJson(response, 404, { error: 'Rota não encontrada.' });
     }
@@ -33,22 +37,27 @@ export default async function handler(request, response) {
     const collection = await getProductsCollection();
 
     if (segments.length === 1 && request.method === 'GET') {
-      const products = await collection.find({}, { projection: { _id: 0 } }).sort({ position: -1 }).toArray();
+      const storeId = url.searchParams.get('storeId');
+      const query = storeId ? createStoreProductQuery(storeId) : {};
+      const products = await collection.find(query, { projection: { _id: 0 } }).sort({ position: -1 }).toArray();
       return sendJson(response, 200, products);
     }
 
     if (segments.length === 2 && segments[1] === 'export' && request.method === 'GET') {
-      requireAuth(request);
-      const products = await collection.find({}, { projection: { _id: 0, position: 0 } }).sort({ position: -1 }).toArray();
+      await requireAuth(request);
+      const storeId = url.searchParams.get('storeId');
+      const query = storeId ? createStoreProductQuery(storeId) : {};
+      const products = await collection.find(query, { projection: { _id: 0, position: 0 } }).sort({ position: -1 }).toArray();
       return sendJson(response, 200, {
         version: 1,
         exportedAt: new Date().toISOString(),
+        storeId: storeId || null,
         products,
       });
     }
 
     if (segments.length === 2 && segments[1] === 'import' && request.method === 'POST') {
-      requireAuth(request);
+      await requireAuth(request);
       const payload = await readJson(request);
       const productsPayload = Array.isArray(payload) ? payload : payload.products;
 
@@ -56,8 +65,9 @@ export default async function handler(request, response) {
         throw new HttpError('Envie um array de produtos ou um envelope com "products".', 400);
       }
 
-      const products = productsPayload.map((product) => normalizeProduct(product));
-      await collection.deleteMany({});
+      const storeId = url.searchParams.get('storeId') || null;
+      const products = productsPayload.map((product) => normalizeProduct({ ...product, storeId: product.storeId || storeId }));
+      await collection.deleteMany(storeId ? createStoreProductQuery(storeId) : {});
 
       if (products.length > 0) {
         await collection.insertMany(products.map((product, index) => ({
@@ -70,9 +80,10 @@ export default async function handler(request, response) {
     }
 
     if (segments.length === 2 && segments[1] === 'reset-seed' && request.method === 'POST') {
-      requireAuth(request);
-      const products = createSeedProducts();
-      await collection.deleteMany({});
+      await requireAuth(request);
+      const storeId = url.searchParams.get('storeId') || DEFAULT_STORE.id;
+      const products = createSeedProducts(storeId);
+      await collection.deleteMany(createStoreProductQuery(storeId));
       await collection.insertMany(products.map((product, index) => ({
         ...product,
         position: products.length - index,
@@ -82,7 +93,7 @@ export default async function handler(request, response) {
     }
 
     if (segments.length === 1 && request.method === 'POST') {
-      requireAuth(request);
+      await requireAuth(request);
       const payload = await readJson(request);
       const product = normalizeProduct(payload);
       const position = await nextPosition(collection);
@@ -98,7 +109,7 @@ export default async function handler(request, response) {
     }
 
     if (segments.length === 3 && segments[2] === 'duplicate' && request.method === 'POST') {
-      requireAuth(request);
+      await requireAuth(request);
       const existingDocument = await collection.findOne({ id });
 
       if (!existingDocument) {
@@ -113,7 +124,7 @@ export default async function handler(request, response) {
     }
 
     if (segments.length === 3 && segments[2] === 'status' && request.method === 'PATCH') {
-      requireAuth(request);
+      await requireAuth(request);
       const existingDocument = await collection.findOne({ id });
 
       if (!existingDocument) {
@@ -147,7 +158,7 @@ export default async function handler(request, response) {
     }
 
     if (request.method === 'PUT' || request.method === 'PATCH') {
-      requireAuth(request);
+      await requireAuth(request);
       const existingDocument = await collection.findOne({ id });
 
       if (!existingDocument) {
@@ -170,7 +181,7 @@ export default async function handler(request, response) {
     }
 
     if (request.method === 'DELETE') {
-      requireAuth(request);
+      await requireAuth(request);
       const result = await collection.deleteOne({ id });
       return result.deletedCount
         ? sendEmpty(response, 204)
@@ -248,6 +259,63 @@ async function handleAuthRoutes(request, response, segments) {
   return sendJson(response, 404, { error: 'Rota não encontrada.' });
 }
 
+async function handleStoreRoutes(request, response, segments) {
+  await requireAuth(request);
+  const stores = await getStoresCollection();
+
+  if (segments.length === 1 && request.method === 'GET') {
+    await ensureDefaultStore(stores);
+    const items = await stores.find({}, { projection: { _id: 0 } }).sort({ createdAt: 1 }).toArray();
+    return sendJson(response, 200, items);
+  }
+
+  if (segments.length === 1 && request.method === 'POST') {
+    const payload = await readJson(request);
+    const store = normalizeStore(payload);
+    await stores.insertOne(store);
+    return sendJson(response, 201, store);
+  }
+
+  const id = decodeURIComponent(segments[1] || '');
+
+  if (!id || segments.length !== 2) {
+    return sendJson(response, 404, { error: 'Rota não encontrada.' });
+  }
+
+  if (request.method === 'PUT' || request.method === 'PATCH') {
+    const existing = await stores.findOne({ id });
+
+    if (!existing) {
+      return sendJson(response, 404, { error: 'Loja não encontrada.' });
+    }
+
+    const payload = await readJson(request);
+    const store = normalizeStore({ ...existing, ...payload, id }, existing);
+    await stores.replaceOne({ id }, store);
+    return sendJson(response, 200, store);
+  }
+
+  if (request.method === 'DELETE') {
+    if (id === DEFAULT_STORE.id) {
+      throw new HttpError('A loja padrão não pode ser excluída.', 400);
+    }
+
+    const products = await getProductsCollection();
+    const productsCount = await products.countDocuments({ storeId: id });
+
+    if (productsCount > 0) {
+      throw new HttpError('Exclua ou mova as camisetas desta loja antes de remover a loja.', 409);
+    }
+
+    const result = await stores.deleteOne({ id });
+    return result.deletedCount
+      ? sendEmpty(response, 204)
+      : sendJson(response, 404, { error: 'Loja não encontrada.' });
+  }
+
+  return sendJson(response, 405, { error: 'Método não permitido para esta rota.' });
+}
+
 async function getProductsCollection() {
   const client = await getMongoClient();
   const dbName = process.env.MONGODB_DB || 'tech-tees-admin';
@@ -256,6 +324,18 @@ async function getProductsCollection() {
 
   await collection.createIndex({ id: 1 }, { unique: true });
   await collection.createIndex({ position: -1 });
+
+  return collection;
+}
+
+async function getStoresCollection() {
+  const client = await getMongoClient();
+  const dbName = process.env.MONGODB_DB || 'tech-tees-admin';
+  const collectionName = process.env.MONGODB_STORES_COLLECTION || 'stores';
+  const collection = client.db(dbName).collection(collectionName);
+
+  await collection.createIndex({ id: 1 }, { unique: true });
+  await collection.createIndex({ slug: 1 }, { unique: true });
 
   return collection;
 }
@@ -330,6 +410,7 @@ function normalizeProduct(input = {}, existingProduct = null) {
 
   return {
     id: String(existingProduct?.id || input.id || generateId()),
+    storeId: String(input.storeId || existingProduct?.storeId || DEFAULT_STORE.id),
     name,
     slug: slugInput || createSlug(name),
     category,
@@ -352,6 +433,64 @@ function normalizeProduct(input = {}, existingProduct = null) {
   };
 }
 
+const DEFAULT_STORE = {
+  id: 'default-store',
+  name: 'Tech Tees',
+  slug: 'tech-tees',
+  description: 'Loja padrão da Tech Tees',
+  status: 'active',
+};
+
+function normalizeStore(input = {}, existingStore = null) {
+  const now = new Date().toISOString();
+  const name = String(input.name || '').trim();
+
+  if (!name) {
+    throw new HttpError('O campo "name" é obrigatório.', 400);
+  }
+
+  const slug = createSlug(input.slug || name);
+
+  return {
+    id: String(existingStore?.id || input.id || generateId()),
+    name,
+    slug,
+    description: String(input.description || '').trim(),
+    status: input.status === 'archived' ? 'archived' : 'active',
+    createdAt: existingStore?.createdAt || String(input.createdAt || now),
+    updatedAt: now,
+  };
+}
+
+async function ensureDefaultStore(stores) {
+  const existing = await stores.findOne({ id: DEFAULT_STORE.id });
+
+  if (existing) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await stores.insertOne({
+    ...DEFAULT_STORE,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function createStoreProductQuery(storeId) {
+  if (storeId === DEFAULT_STORE.id) {
+    return {
+      $or: [
+        { storeId },
+        { storeId: { $exists: false } },
+        { storeId: null },
+      ],
+    };
+  }
+
+  return { storeId };
+}
+
 function duplicateProduct(product) {
   const now = new Date().toISOString();
 
@@ -368,12 +507,13 @@ function duplicateProduct(product) {
   };
 }
 
-function createSeedProducts() {
+function createSeedProducts(storeId = DEFAULT_STORE.id) {
   const now = new Date().toISOString();
 
   return [
     {
       id: generateId(),
+      storeId,
       name: 'Camiseta Não é Bug, é Feature',
       slug: 'camiseta-nao-e-bug-e-feature',
       category: 'Dev',

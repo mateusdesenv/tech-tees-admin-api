@@ -85,6 +85,7 @@ MONGODB_URI=mongodb+srv://USUARIO:SENHA@cluster.mongodb.net/?retryWrites=true&w=
 MONGODB_DB=tech-tees-admin
 MONGODB_COLLECTION=products
 MONGODB_USERS_COLLECTION=users
+MONGODB_STORES_COLLECTION=stores
 AUTH_SECRET=gere-um-segredo-forte-aqui
 CORS_ORIGIN=https://url-do-admin.vercel.app
 ```
@@ -114,6 +115,11 @@ MAX_IMPORT_PRODUCTS=1000
 - `POST /auth/register`
 - `POST /auth/login`
 - `GET /auth/me`
+- `GET /stores`
+- `POST /stores`
+- `PUT /stores/:id`
+- `PATCH /stores/:id`
+- `DELETE /stores/:id`
 - `GET /products`
 - `POST /products`
 - `GET /products/export`
