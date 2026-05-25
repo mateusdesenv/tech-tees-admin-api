@@ -11,5 +11,5 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "api/**/*.ts"]
+  "include": ["src/**/*.ts"]
 }
