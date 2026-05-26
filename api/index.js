@@ -1,5 +1,5 @@
 import { MongoClient } from 'mongodb';
-import { createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, pbkdf2Sync, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const PRODUCT_STATUSES = ['active', 'draft', 'archived'];
 const PRODUCT_CATEGORIES = ['Dev', 'Designer', 'Audiovisual', 'Marketing', 'Gamer', 'Outras Profissões'];
@@ -28,6 +28,15 @@ export default async function handler(request, response) {
 
     if (segments[0] === 'stores') {
       return handleStoreRoutes(request, response, segments);
+    }
+
+    if (segments[0] === 'checkout') {
+      return handleCheckoutRoutes(request, response, segments);
+    }
+
+    if (segments[0] === 'webhooks' && segments[1] === 'mercado-pago' && request.method === 'POST') {
+      await readJson(request);
+      return sendJson(response, 200, { received: true });
     }
 
     if (segments[0] !== 'products') {
@@ -316,6 +325,22 @@ async function handleStoreRoutes(request, response, segments) {
   return sendJson(response, 405, { error: 'Método não permitido para esta rota.' });
 }
 
+async function handleCheckoutRoutes(request, response, segments) {
+  if (segments.length === 2 && segments[1] === 'create-preference' && request.method === 'POST') {
+    const payload = await readJson(request);
+    const preference = await createMercadoPagoPreference(payload);
+    return sendJson(response, 201, preference);
+  }
+
+  if (segments.length === 2 && segments[1] === 'process-payment' && request.method === 'POST') {
+    const payload = await readJson(request);
+    const payment = await createMercadoPagoPayment(payload);
+    return sendJson(response, 201, payment);
+  }
+
+  return sendJson(response, 404, { error: 'Rota não encontrada.' });
+}
+
 async function getProductsCollection() {
   const client = await getMongoClient();
   const dbName = process.env.MONGODB_DB || 'tech-tees-admin';
@@ -386,6 +411,482 @@ async function readJson(request) {
   } catch {
     throw new HttpError('JSON inválido.', 400);
   }
+}
+
+async function createMercadoPagoPreference(payload = {}) {
+  const accessToken = String(process.env.MERCADO_PAGO_ACCESS_TOKEN || '').trim();
+
+  if (!accessToken) {
+    throw new HttpError('MERCADO_PAGO_ACCESS_TOKEN não configurado.', 503);
+  }
+
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const normalizedItems = items.map(normalizeCheckoutItem);
+
+  if (normalizedItems.length === 0) {
+    throw new HttpError('O carrinho está vazio.', 400);
+  }
+
+  await validateCheckoutInventory(normalizedItems);
+
+  const shippingCost = toNumber(payload.shipping ?? payload.shippingCost, 0);
+  if (shippingCost > 0) {
+    normalizedItems.push({
+      id: 'shipping',
+      title: 'Frete',
+      quantity: 1,
+      unit_price: Number(shippingCost.toFixed(2)),
+      currency_id: 'BRL',
+    });
+  }
+
+  const ecommerceBaseUrl = String(process.env.ECOMMERCE_BASE_URL || 'http://localhost:4200').replace(/\/+$/, '');
+  const appBaseUrl = String(process.env.APP_BASE_URL || process.env.API_BASE_URL || '').replace(/\/+$/, '');
+  const externalReference = payload.orderId || generateId();
+  const backUrls = createCheckoutBackUrls(ecommerceBaseUrl);
+  const notificationUrl = createMercadoPagoNotificationUrl(appBaseUrl);
+
+  const preferencePayload = {
+    items: normalizedItems,
+    external_reference: externalReference,
+    statement_descriptor: 'TECH TEES',
+    metadata: {
+      order_id: externalReference,
+      store_id: payload.storeId || null,
+    },
+    back_urls: backUrls,
+    notification_url: notificationUrl,
+    auto_return: isPublicHttpUrl(backUrls?.success) ? 'approved' : undefined,
+  };
+
+  const mercadoPagoResponse = await fetch('https://api.mercadopago.com/checkout/preferences', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(preferencePayload),
+  });
+
+  const responseBody = await mercadoPagoResponse.json().catch(() => ({}));
+
+  if (!mercadoPagoResponse.ok) {
+    const mercadoPagoError = normalizeMercadoPagoError(responseBody);
+    console.error('Mercado Pago preference error', {
+      status: mercadoPagoResponse.status,
+      error: mercadoPagoError.error,
+      message: mercadoPagoError.message,
+      cause: mercadoPagoError.cause,
+    });
+
+    throw new HttpError(
+      createMercadoPagoErrorMessage(mercadoPagoResponse.status, mercadoPagoError),
+      mercadoPagoResponse.status,
+    );
+  }
+
+  return {
+    id: responseBody.id,
+    initPoint: responseBody.init_point,
+    sandboxInitPoint: responseBody.sandbox_init_point,
+    externalReference,
+  };
+}
+
+function createCheckoutBackUrls(baseUrl) {
+  const normalizedBaseUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
+
+  if (!normalizedBaseUrl) {
+    return undefined;
+  }
+
+  try {
+    const success = new URL('/?payment=success', normalizedBaseUrl);
+    const failure = new URL('/?payment=failure', normalizedBaseUrl);
+    const pending = new URL('/?payment=pending', normalizedBaseUrl);
+
+    return {
+      success: success.toString(),
+      failure: failure.toString(),
+      pending: pending.toString(),
+    };
+  } catch {
+    throw new HttpError('ECOMMERCE_BASE_URL precisa ser uma URL absoluta válida.', 503);
+  }
+}
+
+function createMercadoPagoNotificationUrl(baseUrl) {
+  const normalizedBaseUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
+
+  if (!normalizedBaseUrl) {
+    return undefined;
+  }
+
+  let notificationUrl;
+
+  try {
+    notificationUrl = new URL('/webhooks/mercado-pago', normalizedBaseUrl).toString();
+  } catch {
+    throw new HttpError('APP_BASE_URL/API_BASE_URL precisa ser uma URL absoluta válida.', 503);
+  }
+
+  return isPublicHttpUrl(notificationUrl) ? notificationUrl : undefined;
+}
+
+function isPublicHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    const isLocalhost = hostname === 'localhost'
+      || hostname === '127.0.0.1'
+      || hostname === '::1'
+      || hostname.endsWith('.local');
+    const isPrivateIp = /^10\./.test(hostname)
+      || /^192\.168\./.test(hostname)
+      || /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+
+    return ['http:', 'https:'].includes(url.protocol) && !isLocalhost && !isPrivateIp;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeMercadoPagoError(responseBody = {}) {
+  const cause = Array.isArray(responseBody.cause)
+    ? responseBody.cause.map((item) => ({
+        code: item?.code,
+        description: item?.description,
+      }))
+    : [];
+
+  return {
+    error: responseBody.error || null,
+    message: responseBody.message || null,
+    cause,
+  };
+}
+
+function createMercadoPagoErrorMessage(statusCode, mercadoPagoError) {
+  const causeText = mercadoPagoError.cause
+    .map((item) => [item.code, item.description].filter(Boolean).join(': '))
+    .filter(Boolean)
+    .join(' | ');
+  const rawMessage = mercadoPagoError.message || mercadoPagoError.error || causeText;
+  const unauthorizedPolicy = statusCode === 403
+    && /unauthorized|policy/i.test([mercadoPagoError.error, rawMessage, causeText].filter(Boolean).join(' '));
+
+  if (unauthorizedPolicy) {
+    return 'Mercado Pago recusou a operação: confira se MERCADO_PAGO_ACCESS_TOKEN é um Access Token válido, ativo e do mesmo ambiente da conta.';
+  }
+
+  if (statusCode === 401 && /unauthorized use of live credentials/i.test(rawMessage)) {
+    return 'Mercado Pago recusou credenciais de produção neste pagamento. Para testar, use Public Key e Access Token TEST- e um comprador/cartão de teste; em produção, use APP_USR- com comprador real.';
+  }
+
+  if (statusCode === 401 && /access_token/i.test(rawMessage)) {
+    return 'Mercado Pago não reconheceu o Access Token. Confira se MERCADO_PAGO_ACCESS_TOKEN recebeu o Access Token TEST-/APP_USR-, não a Public Key.';
+  }
+
+  return rawMessage || 'Não foi possível criar a preferência de pagamento.';
+}
+
+async function createMercadoPagoPayment(payload = {}) {
+  const accessToken = String(process.env.MERCADO_PAGO_ACCESS_TOKEN || '').trim();
+
+  if (!accessToken) {
+    throw new HttpError('MERCADO_PAGO_ACCESS_TOKEN não configurado.', 503);
+  }
+
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const normalizedItems = items.map(normalizeCheckoutItem);
+
+  if (normalizedItems.length === 0) {
+    throw new HttpError('O carrinho está vazio.', 400);
+  }
+
+  await validateCheckoutInventory(normalizedItems);
+
+  const shippingCost = toNumber(payload.shipping ?? payload.shippingCost, 0);
+  const transactionAmount = calculateCheckoutAmount(normalizedItems, shippingCost);
+  const formData = await normalizeMercadoPagoPaymentFormData(payload.payment || payload.formData || {});
+  const externalReference = payload.orderId || generateId();
+  const appBaseUrl = String(process.env.APP_BASE_URL || process.env.API_BASE_URL || '').replace(/\/+$/, '');
+  const notificationUrl = createMercadoPagoNotificationUrl(appBaseUrl);
+
+  const paymentPayload = removeUndefinedValues({
+    token: formData.token,
+    issuer_id: formData.issuerId,
+    payment_method_id: formData.paymentMethodId,
+    transaction_amount: transactionAmount,
+    installments: formData.installments,
+    description: `Tech Tees - pedido ${externalReference}`,
+    external_reference: externalReference,
+    notification_url: notificationUrl,
+    payer: {
+      email: formData.payerEmail,
+      identification: formData.identification,
+    },
+  });
+
+  const mercadoPagoResponse = await fetch('https://api.mercadopago.com/v1/payments', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'X-Idempotency-Key': randomUUID(),
+    },
+    body: JSON.stringify(paymentPayload),
+  });
+
+  const responseBody = await mercadoPagoResponse.json().catch(() => ({}));
+
+  if (!mercadoPagoResponse.ok) {
+    const mercadoPagoError = normalizeMercadoPagoError(responseBody);
+    console.error('Mercado Pago payment error', {
+      status: mercadoPagoResponse.status,
+      error: mercadoPagoError.error,
+      message: mercadoPagoError.message,
+      statusDetail: responseBody.status_detail,
+      cause: mercadoPagoError.cause,
+      payment: {
+        transactionAmount: paymentPayload.transaction_amount,
+        installments: paymentPayload.installments,
+        paymentMethodId: paymentPayload.payment_method_id,
+        issuerId: paymentPayload.issuer_id,
+        payerEmail: paymentPayload.payer?.email,
+        notificationUrlPresent: Boolean(paymentPayload.notification_url),
+      },
+    });
+
+    throw new HttpError(
+      createMercadoPagoErrorMessage(mercadoPagoResponse.status, mercadoPagoError),
+      mercadoPagoResponse.status,
+    );
+  }
+
+  if (responseBody.status === 'approved') {
+    await registerApprovedCheckout(normalizedItems);
+  }
+
+  return {
+    id: responseBody.id,
+    status: responseBody.status,
+    statusDetail: responseBody.status_detail,
+    paymentMethodId: responseBody.payment_method_id,
+    externalReference,
+  };
+}
+
+async function validateCheckoutInventory(items) {
+  const products = await getProductsCollection();
+  const saleItems = items.filter((item) => item.id !== 'shipping');
+
+  await Promise.all(
+    saleItems.map(async (item) => {
+      const product = await products.findOne(
+        { id: item.id },
+        { projection: { id: 1, name: 1, stock: 1, status: 1 } },
+      );
+
+      if (!product || product.status !== 'active') {
+        throw new HttpError(`Produto indisponível: ${item.title}.`, 409);
+      }
+
+      if (toNumber(product.stock, 0) < item.quantity) {
+        throw new HttpError(`Estoque insuficiente para ${product.name || item.title}.`, 409);
+      }
+    }),
+  );
+}
+
+async function registerApprovedCheckout(items) {
+  const products = await getProductsCollection();
+  const now = new Date().toISOString();
+  const saleItems = items.filter((item) => item.id !== 'shipping');
+
+  await Promise.all(
+    saleItems.map((item) =>
+      products.updateOne(
+        { id: item.id },
+        {
+          $inc: {
+            sales: item.quantity,
+            stock: -item.quantity,
+          },
+          $set: {
+            updatedAt: now,
+          },
+        },
+      ),
+    ),
+  );
+}
+
+function calculateCheckoutAmount(items, shippingCost = 0) {
+  const itemsAmount = items.reduce((total, item) => total + item.unit_price * item.quantity, 0);
+  return Number((itemsAmount + Math.max(0, shippingCost)).toFixed(2));
+}
+
+async function normalizeMercadoPagoPaymentFormData(formData = {}) {
+  const cardData = formData.card || {};
+  const cardTokenData = formData.token ? null : await createMercadoPagoCardToken(cardData, formData);
+  const token = String(formData.token || '').trim();
+  const paymentMethodId = String(
+    formData.payment_method_id
+      || formData.paymentMethodId
+      || cardTokenData?.paymentMethodId
+      || '',
+  ).trim();
+  const issuerId = String(formData.issuer_id || formData.issuerId || cardTokenData?.issuerId || '').trim();
+  const installments = Math.max(1, Math.floor(toNumber(formData.installments, 1)));
+  const payer = formData.payer || {};
+  const payerEmail = String(payer.email || formData.payer_email || formData.email || cardData.email || '').trim();
+  const identification = payer.identification || formData.identification || {};
+  const identificationType = String(identification.type || '').trim();
+  const identificationNumber = String(identification.number || '').replace(/\D/g, '');
+
+  if (!token && !cardTokenData?.token) {
+    throw new HttpError('Token do cartão não informado.', 400);
+  }
+
+  if (!paymentMethodId) {
+    throw new HttpError('Meio de pagamento não informado.', 400);
+  }
+
+  if (!payerEmail) {
+    throw new HttpError('E-mail do pagador não informado.', 400);
+  }
+
+  if (!identificationType || !identificationNumber) {
+    throw new HttpError('Documento do pagador não informado.', 400);
+  }
+
+  return {
+    token: token || cardTokenData.token,
+    paymentMethodId,
+    issuerId,
+    installments,
+    payerEmail,
+    identification: {
+      type: identificationType,
+      number: identificationNumber,
+    },
+  };
+}
+
+async function createMercadoPagoCardToken(cardData = {}, formData = {}) {
+  const publicKey = String(process.env.MERCADO_PAGO_PUBLIC_KEY || '').trim();
+
+  if (!publicKey) {
+    throw new HttpError('MERCADO_PAGO_PUBLIC_KEY não configurada para tokenização local.', 503);
+  }
+
+  const cardNumber = String(cardData.cardNumber || '').replace(/\D/g, '');
+  const securityCode = String(cardData.securityCode || '').replace(/\D/g, '');
+  const cardholderName = String(cardData.cardholderName || '').trim();
+  const expiration = parseCardExpiration(cardData.expirationDate || cardData.expiration);
+  const identificationType = String(cardData.identificationType || formData.identification?.type || 'CPF').trim();
+  const identificationNumber = String(cardData.identificationNumber || formData.identification?.number || '').replace(/\D/g, '');
+
+  if (!cardNumber || cardNumber.length < 12) {
+    throw new HttpError('Número do cartão inválido.', 400);
+  }
+
+  if (!securityCode || !cardholderName || !identificationNumber) {
+    throw new HttpError('Preencha nome, CVV e documento do cartão.', 400);
+  }
+
+  const cardTokenResponse = await fetch(`https://api.mercadopago.com/v1/card_tokens?public_key=${encodeURIComponent(publicKey)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      card_number: cardNumber,
+      expiration_month: expiration.month,
+      expiration_year: expiration.year,
+      security_code: securityCode,
+      cardholder: {
+        name: cardholderName,
+        identification: {
+          type: identificationType,
+          number: identificationNumber,
+        },
+      },
+    }),
+  });
+  const cardTokenBody = await cardTokenResponse.json().catch(() => ({}));
+
+  if (!cardTokenResponse.ok) {
+    const mercadoPagoError = normalizeMercadoPagoError(cardTokenBody);
+    throw new HttpError(createMercadoPagoErrorMessage(cardTokenResponse.status, mercadoPagoError), cardTokenResponse.status);
+  }
+
+  const paymentMethod = await findMercadoPagoPaymentMethod(publicKey, cardNumber.slice(0, 6));
+
+  return {
+    token: cardTokenBody.id,
+    paymentMethodId: paymentMethod.id,
+    issuerId: paymentMethod.issuerId,
+  };
+}
+
+async function findMercadoPagoPaymentMethod(publicKey, bin) {
+  const paymentMethodsResponse = await fetch(
+    `https://api.mercadopago.com/v1/payment_methods/search?public_key=${encodeURIComponent(publicKey)}&bins=${encodeURIComponent(bin)}`,
+  );
+  const paymentMethodsBody = await paymentMethodsResponse.json().catch(() => ({}));
+  const paymentMethod = Array.isArray(paymentMethodsBody.results) ? paymentMethodsBody.results[0] : null;
+
+  if (!paymentMethodsResponse.ok || !paymentMethod?.id) {
+    throw new HttpError('Não foi possível identificar a bandeira do cartão.', 400);
+  }
+
+  return {
+    id: paymentMethod.id,
+    issuerId: paymentMethod.issuer?.id ? String(paymentMethod.issuer.id) : '',
+  };
+}
+
+function parseCardExpiration(value) {
+  const [monthValue, yearValue] = String(value || '').split('/').map((part) => part.trim());
+  const month = Number(monthValue);
+  const year = Number(yearValue?.length === 2 ? `20${yearValue}` : yearValue);
+
+  if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year) || year < new Date().getFullYear()) {
+    throw new HttpError('Validade do cartão inválida. Use MM/AAAA.', 400);
+  }
+
+  return { month, year };
+}
+
+function removeUndefinedValues(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entryValue]) => entryValue !== undefined && entryValue !== ''),
+  );
+}
+
+function normalizeCheckoutItem(item = {}) {
+  const title = String(item.title || item.name || '').trim();
+  const quantity = Math.max(1, Math.floor(toNumber(item.quantity, 1)));
+  const unitPrice = toNumber(item.unitPrice ?? item.unit_price ?? item.price, 0);
+
+  if (!title) {
+    throw new HttpError('Todos os itens precisam de título.', 400);
+  }
+
+  if (unitPrice <= 0) {
+    throw new HttpError('Todos os itens precisam ter preço maior que zero.', 400);
+  }
+
+  return {
+    id: String(item.id || item.productId || generateId()),
+    title,
+    quantity,
+    unit_price: Number(unitPrice.toFixed(2)),
+    currency_id: 'BRL',
+    picture_url: item.image || undefined,
+  };
 }
 
 function normalizeProduct(input = {}, existingProduct = null) {

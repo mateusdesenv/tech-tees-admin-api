@@ -87,6 +87,10 @@ MONGODB_COLLECTION=products
 MONGODB_USERS_COLLECTION=users
 MONGODB_STORES_COLLECTION=stores
 AUTH_SECRET=gere-um-segredo-forte-aqui
+MERCADO_PAGO_ACCESS_TOKEN=APP_USR-ou-TEST-...
+API_BASE_URL=https://sua-api.vercel.app
+APP_BASE_URL=https://sua-api.vercel.app
+ECOMMERCE_BASE_URL=https://sua-loja.vercel.app
 CORS_ORIGIN=https://url-do-admin.vercel.app
 ```
 
@@ -120,6 +124,9 @@ MAX_IMPORT_PRODUCTS=1000
 - `PUT /stores/:id`
 - `PATCH /stores/:id`
 - `DELETE /stores/:id`
+- `POST /checkout/create-preference`
+- `POST /checkout/process-payment`
+- `POST /webhooks/mercado-pago`
 - `GET /products`
 - `POST /products`
 - `GET /products/export`
