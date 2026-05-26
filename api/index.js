@@ -23,15 +23,15 @@ export default async function handler(request, response) {
     }
 
     if (segments[0] === 'auth') {
-      return handleAuthRoutes(request, response, segments);
+      return await handleAuthRoutes(request, response, segments);
     }
 
     if (segments[0] === 'stores') {
-      return handleStoreRoutes(request, response, segments);
+      return await handleStoreRoutes(request, response, segments);
     }
 
     if (segments[0] === 'checkout') {
-      return handleCheckoutRoutes(request, response, segments);
+      return await handleCheckoutRoutes(request, response, segments);
     }
 
     if (segments[0] === 'webhooks' && segments[1] === 'mercado-pago' && request.method === 'POST') {
