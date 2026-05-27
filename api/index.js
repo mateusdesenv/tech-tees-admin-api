@@ -269,8 +269,27 @@ async function handleAuthRoutes(request, response, segments) {
 }
 
 async function handleStoreRoutes(request, response, segments) {
-  await requireAuth(request);
   const stores = await getStoresCollection();
+  const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+
+  if (segments.length === 2 && segments[1] === 'public' && request.method === 'GET') {
+    const slug = createSlug(url.searchParams.get('slug') || '');
+
+    if (!slug) {
+      throw new HttpError('Informe o slug da loja.', 400);
+    }
+
+    const store = await stores.findOne(
+      { slug, status: 'active' },
+      { projection: { _id: 0, id: 1, name: 1, slug: 1, description: 1, status: 1 } },
+    );
+
+    return store
+      ? sendJson(response, 200, store)
+      : sendJson(response, 404, { error: 'Loja não encontrada.' });
+  }
+
+  await requireAuth(request);
 
   if (segments.length === 1 && request.method === 'GET') {
     await ensureDefaultStore(stores);
