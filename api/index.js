@@ -34,8 +34,16 @@ export default async function handler(request, response) {
       return await handleCheckoutRoutes(request, response, segments);
     }
 
+    if (segments[0] === 'orders') {
+      return await handleOrderRoutes(request, response, segments);
+    }
+
+    if (segments[0] === 'admin') {
+      return await handleAdminRoutes(request, response, segments);
+    }
+
     if (segments[0] === 'webhooks' && segments[1] === 'mercado-pago' && request.method === 'POST') {
-      await readJson(request);
+      await handleMercadoPagoWebhook(request, url);
       return sendJson(response, 200, { received: true });
     }
 
@@ -190,7 +198,8 @@ export default async function handler(request, response) {
     }
 
     if (request.method === 'DELETE') {
-      await requireAuth(request);
+      const user = await requireAuth(request);
+      await requirePasswordConfirmation(request, user);
       const result = await collection.deleteOne({ id });
       return result.deletedCount
         ? sendEmpty(response, 204)
@@ -281,7 +290,7 @@ async function handleStoreRoutes(request, response, segments) {
 
     const store = await stores.findOne(
       { slug, status: 'active' },
-      { projection: { _id: 0, id: 1, name: 1, slug: 1, description: 1, status: 1 } },
+      { projection: { _id: 0, id: 1, name: 1, slug: 1, description: 1, defaultShipping: 1, status: 1 } },
     );
 
     return store
@@ -324,6 +333,9 @@ async function handleStoreRoutes(request, response, segments) {
   }
 
   if (request.method === 'DELETE') {
+    const user = await requireAuth(request);
+    await requirePasswordConfirmation(request, user);
+
     if (id === DEFAULT_STORE.id) {
       throw new HttpError('A loja padrão não pode ser excluída.', 400);
     }
@@ -355,6 +367,115 @@ async function handleCheckoutRoutes(request, response, segments) {
     const payload = await readJson(request);
     const payment = await createMercadoPagoPayment(payload);
     return sendJson(response, 201, payment);
+  }
+
+  return sendJson(response, 404, { error: 'Rota não encontrada.' });
+}
+
+async function handleMercadoPagoWebhook(request, url) {
+  const payload = await readJson(request);
+  const paymentId = payload?.data?.id || payload?.id || url.searchParams.get('data.id') || url.searchParams.get('id');
+  const eventType = payload?.type || payload?.topic || url.searchParams.get('type') || url.searchParams.get('topic');
+
+  if (!paymentId || !String(eventType || '').includes('payment')) {
+    return;
+  }
+
+  const payment = await fetchMercadoPagoPayment(paymentId);
+
+  if (payment.status !== 'approved') {
+    return;
+  }
+
+  const metadata = payment.metadata || {};
+  const metadataItems = normalizePaymentMetadataItems(metadata.items);
+  const items = metadataItems.map(normalizeCheckoutItem);
+
+  if (items.length === 0) {
+    console.warn('Mercado Pago webhook approved payment without items metadata', {
+      paymentId,
+      externalReference: payment.external_reference,
+    });
+    return;
+  }
+
+  await registerApprovedCheckout(items, {
+    externalReference: payment.external_reference || metadata.order_id,
+    paymentId: payment.id,
+    paymentStatus: payment.status,
+    buyerName: metadata.buyer_name || payment.card?.cardholder?.name,
+    payerEmail: payment.payer?.email,
+    shippingCost: metadata.shipping_cost,
+    totalAmount: payment.transaction_amount,
+    storeId: metadata.store_id,
+  });
+}
+
+async function fetchMercadoPagoPayment(paymentId) {
+  const accessToken = String(process.env.MERCADO_PAGO_ACCESS_TOKEN || '').trim();
+
+  if (!accessToken) {
+    throw new HttpError('MERCADO_PAGO_ACCESS_TOKEN não configurado.', 503);
+  }
+
+  const mercadoPagoResponse = await fetch(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  const responseBody = await mercadoPagoResponse.json().catch(() => ({}));
+
+  if (!mercadoPagoResponse.ok) {
+    const mercadoPagoError = normalizeMercadoPagoError(responseBody);
+    throw new HttpError(createMercadoPagoErrorMessage(mercadoPagoResponse.status, mercadoPagoError), mercadoPagoResponse.status);
+  }
+
+  return responseBody;
+}
+
+async function handleOrderRoutes(request, response, segments) {
+  await requireAuth(request);
+
+  if (segments.length === 1 && request.method === 'GET') {
+    const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+    const storeId = url.searchParams.get('storeId');
+    const orders = await getOrdersCollection();
+    const query = storeId ? { storeId } : {};
+    const items = await orders.find(query, { projection: { _id: 0 } }).sort({ createdAt: -1 }).toArray();
+    return sendJson(response, 200, items);
+  }
+
+  return sendJson(response, 404, { error: 'Rota não encontrada.' });
+}
+
+async function handleAdminRoutes(request, response, segments) {
+  const user = await requireAuth(request);
+
+  if (segments.length === 2 && segments[1] === 'collections' && request.method === 'GET') {
+    const entries = await Promise.all(
+      ['products', 'stores', 'orders', 'users'].map(async (collectionKey) => {
+        const collection = await getKnownCollection(collectionKey);
+        return [collectionKey, await collection.countDocuments({})];
+      }),
+    );
+
+    return sendJson(response, 200, Object.fromEntries(entries));
+  }
+
+  if (segments.length === 3 && segments[1] === 'collections' && request.method === 'DELETE') {
+    await requirePasswordConfirmation(request, user);
+    const collectionKey = decodeURIComponent(segments[2] || '');
+    const collection = await getKnownCollection(collectionKey);
+    const result = await collection.deleteMany({});
+
+    if (collectionKey === 'stores') {
+      await ensureDefaultStore(collection);
+    }
+
+    return sendJson(response, 200, {
+      collection: collectionKey,
+      deletedCount: result.deletedCount || 0,
+    });
   }
 
   return sendJson(response, 404, { error: 'Rota não encontrada.' });
@@ -394,6 +515,39 @@ async function getUsersCollection() {
   await collection.createIndex({ id: 1 }, { unique: true });
 
   return collection;
+}
+
+async function getOrdersCollection() {
+  const client = await getMongoClient();
+  const dbName = process.env.MONGODB_DB || 'tech-tees-admin';
+  const collectionName = process.env.MONGODB_ORDERS_COLLECTION || 'orders';
+  const collection = client.db(dbName).collection(collectionName);
+
+  await collection.createIndex({ id: 1 }, { unique: true });
+  await collection.createIndex({ storeId: 1, createdAt: -1 });
+  await collection.createIndex({ externalReference: 1 });
+
+  return collection;
+}
+
+async function getKnownCollection(collectionKey) {
+  if (collectionKey === 'products') {
+    return await getProductsCollection();
+  }
+
+  if (collectionKey === 'stores') {
+    return await getStoresCollection();
+  }
+
+  if (collectionKey === 'users') {
+    return await getUsersCollection();
+  }
+
+  if (collectionKey === 'orders') {
+    return await getOrdersCollection();
+  }
+
+  throw new HttpError('Collection inválida.', 400);
 }
 
 async function getMongoClient() {
@@ -629,8 +783,18 @@ async function createMercadoPagoPayment(payload = {}) {
   const transactionAmount = calculateCheckoutAmount(normalizedItems, shippingCost);
   const formData = await normalizeMercadoPagoPaymentFormData(payload.payment || payload.formData || {});
   const externalReference = payload.orderId || generateId();
+  const buyerName = String(payload.buyerName || formData.shippingAddress?.fullName || formData.cardholderName || '').trim();
   const appBaseUrl = String(process.env.APP_BASE_URL || process.env.API_BASE_URL || '').replace(/\/+$/, '');
   const notificationUrl = createMercadoPagoNotificationUrl(appBaseUrl);
+  await upsertCheckoutOrderDraft(normalizedItems, {
+    externalReference,
+    buyerName,
+    payerEmail: formData.payerEmail,
+    shippingAddress: formData.shippingAddress,
+    shippingCost,
+    totalAmount: transactionAmount,
+    storeId: payload.storeId,
+  });
 
   const paymentPayload = removeUndefinedValues({
     token: formData.token,
@@ -641,6 +805,11 @@ async function createMercadoPagoPayment(payload = {}) {
     description: `Tech Tees - pedido ${externalReference}`,
     external_reference: externalReference,
     notification_url: notificationUrl,
+    metadata: {
+      order_id: externalReference,
+      store_id: payload.storeId || null,
+      buyer_name: buyerName || null,
+    },
     payer: {
       email: formData.payerEmail,
       identification: formData.identification,
@@ -684,7 +853,17 @@ async function createMercadoPagoPayment(payload = {}) {
   }
 
   if (responseBody.status === 'approved') {
-    await registerApprovedCheckout(normalizedItems);
+    await registerApprovedCheckout(normalizedItems, {
+      externalReference,
+      paymentId: responseBody.id,
+      paymentStatus: responseBody.status,
+      buyerName,
+      payerEmail: formData.payerEmail,
+      shippingAddress: formData.shippingAddress,
+      shippingCost,
+      totalAmount: transactionAmount,
+      storeId: payload.storeId,
+    });
   }
 
   return {
@@ -718,13 +897,41 @@ async function validateCheckoutInventory(items) {
   );
 }
 
-async function registerApprovedCheckout(items) {
+async function registerApprovedCheckout(items, orderInput = {}) {
   const products = await getProductsCollection();
+  const orders = await getOrdersCollection();
   const now = new Date().toISOString();
   const saleItems = items.filter((item) => item.id !== 'shipping');
+  const externalReference = String(orderInput.externalReference || generateId());
+  const existingOrder = await orders.findOne({ externalReference }, { projection: { _id: 0 } });
+
+  if (existingOrder?.paymentStatus === 'approved') {
+    return;
+  }
+
+  const orderItems = saleItems.length > 0
+    ? saleItems
+    : (existingOrder?.items || []).map((item) => ({
+        id: item.productId,
+        title: item.title,
+        quantity: item.quantity,
+        unit_price: item.unitPrice,
+      }));
+
+  if (orderItems.length === 0) {
+    console.warn('Approved checkout without order items', { externalReference });
+    return;
+  }
+
+  const productDocuments = await products.find(
+    { id: { $in: orderItems.map((item) => item.id) } },
+    { projection: { _id: 0, id: 1, storeId: 1 } },
+  ).toArray();
+  const productById = new Map(productDocuments.map((product) => [product.id, product]));
+  const storeId = String(orderInput.storeId || productDocuments[0]?.storeId || DEFAULT_STORE.id);
 
   await Promise.all(
-    saleItems.map((item) =>
+    orderItems.map((item) =>
       products.updateOne(
         { id: item.id },
         {
@@ -738,6 +945,86 @@ async function registerApprovedCheckout(items) {
         },
       ),
     ),
+  );
+
+  const subtotal = Number(orderItems.reduce((total, item) => total + item.unit_price * item.quantity, 0).toFixed(2));
+  const shipping = Number(Math.max(0, toNumber(orderInput.shippingCost ?? existingOrder?.shipping, 0)).toFixed(2));
+  const total = Number(toNumber(orderInput.totalAmount, subtotal + shipping).toFixed(2));
+  const order = {
+    id: existingOrder?.id || generateId(),
+    externalReference,
+    paymentId: orderInput.paymentId ? String(orderInput.paymentId) : '',
+    paymentStatus: String(orderInput.paymentStatus || 'approved'),
+    storeId,
+    buyerName: String(orderInput.buyerName || existingOrder?.buyerName || '').trim() || 'Comprador não informado',
+    payerEmail: String(orderInput.payerEmail || existingOrder?.payerEmail || '').trim(),
+    quantity: orderItems.reduce((totalQuantity, item) => totalQuantity + item.quantity, 0),
+    subtotal,
+    shipping,
+    total,
+    items: orderItems.map((item) => ({
+      productId: item.id,
+      title: item.title,
+      quantity: item.quantity,
+      unitPrice: item.unit_price,
+      storeId: productById.get(item.id)?.storeId || storeId,
+    })),
+    shippingAddress: orderInput.shippingAddress || existingOrder?.shippingAddress || null,
+    createdAt: existingOrder?.createdAt || now,
+    updatedAt: now,
+  };
+
+  await orders.updateOne(
+    { externalReference: order.externalReference },
+    { $set: order },
+    { upsert: true },
+  );
+}
+
+async function upsertCheckoutOrderDraft(items, orderInput = {}) {
+  const products = await getProductsCollection();
+  const orders = await getOrdersCollection();
+  const now = new Date().toISOString();
+  const saleItems = items.filter((item) => item.id !== 'shipping');
+  const productDocuments = await products.find(
+    { id: { $in: saleItems.map((item) => item.id) } },
+    { projection: { _id: 0, id: 1, storeId: 1 } },
+  ).toArray();
+  const productById = new Map(productDocuments.map((product) => [product.id, product]));
+  const storeId = String(orderInput.storeId || productDocuments[0]?.storeId || DEFAULT_STORE.id);
+  const subtotal = Number(saleItems.reduce((total, item) => total + item.unit_price * item.quantity, 0).toFixed(2));
+  const shipping = Number(Math.max(0, toNumber(orderInput.shippingCost, 0)).toFixed(2));
+  const total = Number(toNumber(orderInput.totalAmount, subtotal + shipping).toFixed(2));
+
+  await orders.updateOne(
+    { externalReference: String(orderInput.externalReference) },
+    {
+      $setOnInsert: {
+        id: generateId(),
+        externalReference: String(orderInput.externalReference),
+        paymentStatus: 'created',
+        createdAt: now,
+      },
+      $set: {
+        storeId,
+        buyerName: String(orderInput.buyerName || '').trim() || 'Comprador não informado',
+        payerEmail: String(orderInput.payerEmail || '').trim(),
+        quantity: saleItems.reduce((totalQuantity, item) => totalQuantity + item.quantity, 0),
+        subtotal,
+        shipping,
+        total,
+        items: saleItems.map((item) => ({
+          productId: item.id,
+          title: item.title,
+          quantity: item.quantity,
+          unitPrice: item.unit_price,
+          storeId: productById.get(item.id)?.storeId || storeId,
+        })),
+        shippingAddress: orderInput.shippingAddress || null,
+        updatedAt: now,
+      },
+    },
+    { upsert: true },
   );
 }
 
@@ -786,6 +1073,8 @@ async function normalizeMercadoPagoPaymentFormData(formData = {}) {
     issuerId,
     installments,
     payerEmail,
+    shippingAddress: formData.shippingAddress || null,
+    cardholderName: String(formData.cardholderName || cardData.cardholderName || '').trim(),
     identification: {
       type: identificationType,
       number: identificationNumber,
@@ -908,6 +1197,23 @@ function normalizeCheckoutItem(item = {}) {
   };
 }
 
+function normalizePaymentMetadataItems(value) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsedValue = JSON.parse(value);
+      return Array.isArray(parsedValue) ? parsedValue : [];
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
 function normalizeProduct(input = {}, existingProduct = null) {
   const now = new Date().toISOString();
   const name = String(input.name || '').trim();
@@ -1003,6 +1309,7 @@ const DEFAULT_STORE = {
   name: 'Tech Tees',
   slug: 'tech-tees',
   description: 'Loja padrão da Tech Tees',
+  defaultShipping: 0,
   status: 'active',
 };
 
@@ -1021,6 +1328,7 @@ function normalizeStore(input = {}, existingStore = null) {
     name,
     slug,
     description: String(input.description || '').trim(),
+    defaultShipping: Math.max(0, toNumber(input.defaultShipping ?? existingStore?.defaultShipping, 0)),
     status: input.status === 'archived' ? 'archived' : 'active',
     createdAt: existingStore?.createdAt || String(input.createdAt || now),
     updatedAt: now,
@@ -1125,6 +1433,19 @@ async function requireAuth(request) {
   }
 
   return user;
+}
+
+async function requirePasswordConfirmation(request, user) {
+  const payload = await readJson(request);
+  const password = String(payload.password || '').trim();
+
+  if (!password) {
+    throw new HttpError('Informe sua senha para confirmar a exclusão.', 400);
+  }
+
+  if (!verifyPassword(password, user.passwordHash)) {
+    throw new HttpError('Senha inválida. Exclusão cancelada.', 403);
+  }
 }
 
 function createAuthResponse(user) {
