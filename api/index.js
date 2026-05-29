@@ -942,6 +942,7 @@ function normalizeProduct(input = {}, existingProduct = null) {
     color: String(input.color || '').trim() || DEFAULT_COLOR,
     sizes: toStringArray(input.sizes),
     image: String(input.image || '').trim() || DEFAULT_IMAGE,
+    imageBack: String(input.imageBack || '').trim(),
     description: String(input.description || '').trim(),
     tags: toStringArray(input.tags),
     rating: Math.min(5, Math.max(0, toNumber(input.rating, 0))),
