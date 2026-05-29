@@ -927,6 +927,14 @@ function normalizeProduct(input = {}, existingProduct = null) {
   }
 
   const slugInput = String(input.slug || '').trim();
+  const fallbackVariation = {
+    id: existingProduct?.colors?.[0]?.id || generateId(),
+    color: String(input.color || existingProduct?.color || '').trim() || DEFAULT_COLOR,
+    image: String(input.image || existingProduct?.image || '').trim() || DEFAULT_IMAGE,
+    imageBack: String(input.imageBack || existingProduct?.imageBack || '').trim(),
+  };
+  const colors = normalizeProductColors(input, existingProduct, fallbackVariation);
+  const primaryVariation = colors[0] || fallbackVariation;
 
   return {
     id: String(existingProduct?.id || input.id || generateId()),
@@ -939,10 +947,11 @@ function normalizeProduct(input = {}, existingProduct = null) {
     cost: toNullableNumber(input.cost),
     stock: toNumber(input.stock, 0),
     sku: String(input.sku || '').trim() || generateSku(),
-    color: String(input.color || '').trim() || DEFAULT_COLOR,
+    color: primaryVariation.color,
+    colors,
     sizes: toStringArray(input.sizes),
-    image: String(input.image || '').trim() || DEFAULT_IMAGE,
-    imageBack: String(input.imageBack || '').trim(),
+    image: primaryVariation.image,
+    imageBack: primaryVariation.imageBack || '',
     description: String(input.description || '').trim(),
     tags: toStringArray(input.tags),
     rating: Math.min(5, Math.max(0, toNumber(input.rating, 0))),
@@ -951,6 +960,41 @@ function normalizeProduct(input = {}, existingProduct = null) {
     status,
     createdAt: existingProduct?.createdAt || String(input.createdAt || now),
     updatedAt: now,
+  };
+}
+
+function normalizeProductColors(input = {}, existingProduct = null, fallbackVariation) {
+  const hasColorsPayload = Object.prototype.hasOwnProperty.call(input, 'colors');
+  const source = hasColorsPayload
+    ? input.colors
+    : Array.isArray(existingProduct?.colors) && existingProduct.colors.length > 0
+      ? existingProduct.colors
+      : [fallbackVariation];
+
+  const normalizedColors = Array.isArray(source)
+    ? source.map((variation, index) => normalizeProductColorVariation(variation, fallbackVariation, index))
+    : [];
+
+  const validColors = normalizedColors.filter((variation) => variation.color || variation.image || variation.imageBack);
+
+  if (validColors.length === 0) {
+    return [normalizeProductColorVariation(fallbackVariation, fallbackVariation, 0)];
+  }
+
+  return validColors.map((variation, index) => ({
+    ...variation,
+    id: variation.id || generateId(),
+    color: variation.color || (index === 0 ? DEFAULT_COLOR : `Cor ${index + 1}`),
+    image: variation.image || fallbackVariation.image || DEFAULT_IMAGE,
+  }));
+}
+
+function normalizeProductColorVariation(variation = {}, fallbackVariation = {}, index = 0) {
+  return {
+    id: String(variation.id || '').trim() || generateId(),
+    color: String(variation.color || (index === 0 ? fallbackVariation.color : '') || '').trim(),
+    image: String(variation.image || (index === 0 ? fallbackVariation.image : '') || '').trim(),
+    imageBack: String(variation.imageBack || (index === 0 ? fallbackVariation.imageBack : '') || '').trim(),
   };
 }
 
@@ -1046,6 +1090,13 @@ function createSeedProducts(storeId = DEFAULT_STORE.id) {
       color: 'Preta',
       sizes: ['P', 'M', 'G', 'GG'],
       image: DEFAULT_IMAGE,
+      imageBack: '',
+      colors: [{
+        id: generateId(),
+        color: 'Preta',
+        image: DEFAULT_IMAGE,
+        imageBack: '',
+      }],
       description: 'Camiseta preta com frase dev para quem transforma problemas em funcionalidades.',
       tags: ['dev', 'programação', 'humor'],
       rating: 4.9,
