@@ -391,14 +391,6 @@ async function handleMercadoPagoWebhook(request, url) {
   const metadataItems = normalizePaymentMetadataItems(metadata.items);
   const items = metadataItems.map(normalizeCheckoutItem);
 
-  if (items.length === 0) {
-    console.warn('Mercado Pago webhook approved payment without items metadata', {
-      paymentId,
-      externalReference: payment.external_reference,
-    });
-    return;
-  }
-
   await registerApprovedCheckout(items, {
     externalReference: payment.external_reference || metadata.order_id,
     paymentId: payment.id,
@@ -786,6 +778,12 @@ async function createMercadoPagoPayment(payload = {}) {
   const buyerName = String(payload.buyerName || formData.shippingAddress?.fullName || formData.cardholderName || '').trim();
   const appBaseUrl = String(process.env.APP_BASE_URL || process.env.API_BASE_URL || '').replace(/\/+$/, '');
   const notificationUrl = createMercadoPagoNotificationUrl(appBaseUrl);
+  const paymentMetadata = removeUndefinedValues({
+    order_id: externalReference,
+    store_id: payload.storeId,
+    buyer_name: buyerName,
+  });
+
   await upsertCheckoutOrderDraft(normalizedItems, {
     externalReference,
     buyerName,
@@ -805,11 +803,7 @@ async function createMercadoPagoPayment(payload = {}) {
     description: `Tech Tees - pedido ${externalReference}`,
     external_reference: externalReference,
     notification_url: notificationUrl,
-    metadata: {
-      order_id: externalReference,
-      store_id: payload.storeId || null,
-      buyer_name: buyerName || null,
-    },
+    metadata: paymentMetadata,
     payer: {
       email: formData.payerEmail,
       identification: formData.identification,
