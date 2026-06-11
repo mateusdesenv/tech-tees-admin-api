@@ -6,6 +6,20 @@ const PRODUCT_CATEGORIES = ['Dev', 'Designer', 'Audiovisual', 'Marketing', 'Game
 const DEFAULT_IMAGE = 'assets/products/nao-e-bug-feature.webp';
 const DEFAULT_COLOR = 'Preta';
 const TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 7;
+const INITIAL_COLORS = [
+  ['Preto', 15, 15, 15],
+  ['Branco', 255, 255, 255],
+  ['Cinza Mescla', 176, 178, 176],
+  ['Azul Royal', 0, 83, 160],
+  ['Azul Marinho', 8, 35, 73],
+  ['Verde Bandeira', 0, 118, 61],
+  ['Amarelo Canário', 255, 232, 0],
+  ['Amarelo Ouro', 245, 176, 37],
+  ['Laranja', 241, 105, 35],
+  ['Vermelho', 213, 28, 41],
+  ['Vinho', 115, 18, 37],
+  ['Rosa Pink', 232, 0, 123],
+];
 
 let mongoClientPromise = null;
 
@@ -38,6 +52,10 @@ export default async function handler(request, response) {
       return await handleOrderRoutes(request, response, segments);
     }
 
+    if (segments[0] === 'colors') {
+      return await handleColorRoutes(request, response, segments);
+    }
+
     if (segments[0] === 'admin') {
       return await handleAdminRoutes(request, response, segments);
     }
@@ -57,7 +75,7 @@ export default async function handler(request, response) {
       const storeId = url.searchParams.get('storeId');
       const query = storeId ? createStoreProductQuery(storeId) : {};
       const products = await collection.find(query, { projection: { _id: 0 } }).sort({ position: -1 }).toArray();
-      return sendJson(response, 200, products);
+      return sendJson(response, 200, await attachCatalogColors(products));
     }
 
     if (segments.length === 2 && segments[1] === 'export' && request.method === 'GET') {
@@ -170,7 +188,7 @@ export default async function handler(request, response) {
     if (request.method === 'GET') {
       const product = await collection.findOne({ id }, { projection: { _id: 0, position: 0 } });
       return product
-        ? sendJson(response, 200, product)
+        ? sendJson(response, 200, (await attachCatalogColors([product]))[0])
         : sendJson(response, 404, { error: 'Produto não encontrado.' });
     }
 
@@ -440,6 +458,67 @@ async function handleOrderRoutes(request, response, segments) {
   return sendJson(response, 404, { error: 'Rota não encontrada.' });
 }
 
+async function handleColorRoutes(request, response, segments) {
+  const user = await requireAuth(request);
+  const colors = await getColorsCollection();
+
+  if (segments.length === 1 && request.method === 'GET') {
+    const items = await colors.find({}, { projection: { _id: 0 } }).sort({ name: 1 }).toArray();
+    return sendJson(response, 200, items);
+  }
+
+  if (segments.length === 1 && request.method === 'POST') {
+    const payload = await readJson(request);
+    const color = normalizeColor(payload);
+    await assertUniqueActiveColorName(colors, color);
+    await colors.insertOne(color);
+    return sendJson(response, 201, color);
+  }
+
+  const id = decodeURIComponent(segments[1] || '');
+
+  if (!id || segments.length !== 2) {
+    return sendJson(response, 404, { error: 'Cor não encontrada.' });
+  }
+
+  const existingColor = await colors.findOne({ id }, { projection: { _id: 0 } });
+
+  if (!existingColor) {
+    return sendJson(response, 404, { error: 'Cor não encontrada.' });
+  }
+
+  if (request.method === 'PUT' || request.method === 'PATCH') {
+    const payload = await readJson(request);
+    const color = normalizeColor(
+      request.method === 'PATCH' ? { ...existingColor, ...payload, id } : { ...payload, id },
+      existingColor,
+    );
+    await assertUniqueActiveColorName(colors, color);
+    await colors.replaceOne({ id }, color);
+    return sendJson(response, 200, color);
+  }
+
+  if (request.method === 'DELETE') {
+    await requirePasswordConfirmation(request, user);
+    const products = await getProductsCollection();
+    const linkedProduct = await products.findOne({
+      $or: [
+        { colorId: id },
+        { 'colors.colorId': id },
+      ],
+    }, { projection: { _id: 0, id: 1, name: 1 } });
+
+    if (linkedProduct) {
+      throw new HttpError(`A cor está vinculada ao produto "${linkedProduct.name}". Inative a cor em vez de excluí-la.`, 409);
+    }
+
+    await colors.deleteOne({ id });
+    return sendEmpty(response, 204);
+  }
+
+  return sendJson(response, 405, { error: 'Método não permitido para esta rota.' });
+}
+
 async function handleAdminRoutes(request, response, segments) {
   const user = await requireAuth(request);
 
@@ -522,6 +601,19 @@ async function getOrdersCollection() {
   return collection;
 }
 
+async function getColorsCollection() {
+  const client = await getMongoClient();
+  const dbName = process.env.MONGODB_DB || 'tech-tees-admin';
+  const collectionName = process.env.MONGODB_COLORS_COLLECTION || 'colors';
+  const collection = client.db(dbName).collection(collectionName);
+
+  await collection.createIndex({ id: 1 }, { unique: true });
+  await collection.createIndex({ normalizedName: 1 });
+  await ensureInitialColors(collection);
+
+  return collection;
+}
+
 async function getKnownCollection(collectionKey) {
   if (collectionKey === 'products') {
     return await getProductsCollection();
@@ -592,6 +684,7 @@ async function createMercadoPagoPreference(payload = {}) {
     throw new HttpError('O carrinho está vazio.', 400);
   }
 
+  validateCheckoutSelections(normalizedItems);
   await validateCheckoutInventory(normalizedItems);
 
   const shippingCost = toNumber(payload.shipping ?? payload.shippingCost, 0);
@@ -612,7 +705,14 @@ async function createMercadoPagoPreference(payload = {}) {
   const notificationUrl = createMercadoPagoNotificationUrl(appBaseUrl);
 
   const preferencePayload = {
-    items: normalizedItems,
+    items: normalizedItems.map((item) => ({
+      id: item.id,
+      title: item.title,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+      currency_id: item.currency_id,
+      picture_url: item.picture_url,
+    })),
     external_reference: externalReference,
     statement_descriptor: 'TECH TEES',
     metadata: {
@@ -769,6 +869,7 @@ async function createMercadoPagoPayment(payload = {}) {
     throw new HttpError('O carrinho está vazio.', 400);
   }
 
+  validateCheckoutSelections(normalizedItems);
   await validateCheckoutInventory(normalizedItems);
 
   const shippingCost = toNumber(payload.shipping ?? payload.shippingCost, 0);
@@ -910,6 +1011,9 @@ async function registerApprovedCheckout(items, orderInput = {}) {
         title: item.title,
         quantity: item.quantity,
         unit_price: item.unitPrice,
+        selectedColor: item.selectedColor,
+        selectedSize: item.selectedSize,
+        selectedGender: item.selectedGender,
       }));
 
   if (orderItems.length === 0) {
@@ -962,6 +1066,9 @@ async function registerApprovedCheckout(items, orderInput = {}) {
       quantity: item.quantity,
       unitPrice: item.unit_price,
       storeId: productById.get(item.id)?.storeId || storeId,
+      selectedColor: item.selectedColor || null,
+      selectedSize: item.selectedSize || null,
+      selectedGender: item.selectedGender || null,
     })),
     shippingAddress: orderInput.shippingAddress || existingOrder?.shippingAddress || null,
     createdAt: existingOrder?.createdAt || now,
@@ -1013,6 +1120,9 @@ async function upsertCheckoutOrderDraft(items, orderInput = {}) {
           quantity: item.quantity,
           unitPrice: item.unit_price,
           storeId: productById.get(item.id)?.storeId || storeId,
+          selectedColor: item.selectedColor || null,
+          selectedSize: item.selectedSize || null,
+          selectedGender: item.selectedGender || null,
         })),
         shippingAddress: orderInput.shippingAddress || null,
         updatedAt: now,
@@ -1025,6 +1135,14 @@ async function upsertCheckoutOrderDraft(items, orderInput = {}) {
 function calculateCheckoutAmount(items, shippingCost = 0) {
   const itemsAmount = items.reduce((total, item) => total + item.unit_price * item.quantity, 0);
   return Number((itemsAmount + Math.max(0, shippingCost)).toFixed(2));
+}
+
+function validateCheckoutSelections(items) {
+  const invalidItem = items.find((item) => item.id !== 'shipping' && (!item.selectedSize || !item.selectedGender));
+
+  if (invalidItem) {
+    throw new HttpError(`Selecione tamanho e gênero para ${invalidItem.title}.`, 400);
+  }
 }
 
 async function normalizeMercadoPagoPaymentFormData(formData = {}) {
@@ -1188,6 +1306,9 @@ function normalizeCheckoutItem(item = {}) {
     unit_price: Number(unitPrice.toFixed(2)),
     currency_id: 'BRL',
     picture_url: item.image || undefined,
+    selectedColor: item.selectedColor || item.color || null,
+    selectedSize: String(item.selectedSize || item.size || '').trim() || null,
+    selectedGender: String(item.selectedGender || item.gender || '').trim() || null,
   };
 }
 
@@ -1230,6 +1351,9 @@ function normalizeProduct(input = {}, existingProduct = null) {
   const fallbackVariation = {
     id: existingProduct?.colors?.[0]?.id || generateId(),
     color: String(input.color || existingProduct?.color || '').trim() || DEFAULT_COLOR,
+    colorId: String(input.colorId || existingProduct?.colorId || '').trim(),
+    colorHex: String(input.colorHex || existingProduct?.colorHex || '').trim(),
+    colorRgb: input.colorRgb || existingProduct?.colorRgb || null,
     image: String(input.image || existingProduct?.image || '').trim() || DEFAULT_IMAGE,
     imageBack: String(input.imageBack || existingProduct?.imageBack || '').trim(),
   };
@@ -1248,8 +1372,12 @@ function normalizeProduct(input = {}, existingProduct = null) {
     stock: toNumber(input.stock, 0),
     sku: String(input.sku || '').trim() || generateSku(),
     color: primaryVariation.color,
+    colorId: primaryVariation.colorId || '',
+    colorHex: primaryVariation.colorHex || '',
+    colorRgb: primaryVariation.colorRgb || null,
     colors,
-    sizes: toStringArray(input.sizes),
+    sizes: toStringArray(input.sizes).length ? toStringArray(input.sizes) : ['P', 'M', 'G'],
+    genders: toStringArray(input.genders).length ? toStringArray(input.genders) : ['Masculino', 'Feminino'],
     image: primaryVariation.image,
     imageBack: primaryVariation.imageBack || '',
     description: String(input.description || '').trim(),
@@ -1293,9 +1421,194 @@ function normalizeProductColorVariation(variation = {}, fallbackVariation = {}, 
   return {
     id: String(variation.id || '').trim() || generateId(),
     color: String(variation.color || (index === 0 ? fallbackVariation.color : '') || '').trim(),
+    colorId: String(variation.colorId || (index === 0 ? fallbackVariation.colorId : '') || '').trim(),
+    colorHex: normalizeHex(variation.colorHex || (index === 0 ? fallbackVariation.colorHex : ''), true),
+    colorRgb: normalizeOptionalRgb(variation.colorRgb || (index === 0 ? fallbackVariation.colorRgb : null)),
     image: String(variation.image || (index === 0 ? fallbackVariation.image : '') || '').trim(),
     imageBack: String(variation.imageBack || (index === 0 ? fallbackVariation.imageBack : '') || '').trim(),
   };
+}
+
+function normalizeColor(input = {}, existingColor = null) {
+  const now = new Date().toISOString();
+  const name = normalizeWhitespace(input.name);
+
+  if (!name) {
+    throw new HttpError('O nome da cor é obrigatório.', 400);
+  }
+
+  const rgb = normalizeRgb(input.rgb);
+
+  return {
+    id: String(existingColor?.id || input.id || generateId()),
+    name,
+    normalizedName: normalizeColorName(name),
+    rgb,
+    hex: rgbToHex(rgb),
+    active: input.active !== false,
+    createdAt: existingColor?.createdAt || String(input.createdAt || now),
+    updatedAt: now,
+  };
+}
+
+async function assertUniqueActiveColorName(collection, color) {
+  if (!color.active) {
+    return;
+  }
+
+  const duplicate = await collection.findOne({
+    id: { $ne: color.id },
+    normalizedName: color.normalizedName,
+    active: true,
+  });
+
+  if (duplicate) {
+    throw new HttpError(`Já existe uma cor ativa chamada "${color.name}".`, 409);
+  }
+}
+
+async function ensureInitialColors(collection) {
+  const now = new Date().toISOString();
+  const operations = INITIAL_COLORS.map(([name, r, g, b]) => {
+    const rgb = { r, g, b };
+    const normalizedName = normalizeColorName(name);
+    return {
+      updateOne: {
+        filter: { normalizedName },
+        update: {
+          $setOnInsert: {
+            id: generateId(),
+            name,
+            normalizedName,
+            rgb,
+            hex: rgbToHex(rgb),
+            active: true,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+        upsert: true,
+      },
+    };
+  });
+
+  await collection.bulkWrite(operations, { ordered: false });
+}
+
+function normalizeRgb(value = {}) {
+  const rgb = {
+    r: normalizeRgbChannel(value.r, 'R'),
+    g: normalizeRgbChannel(value.g, 'G'),
+    b: normalizeRgbChannel(value.b, 'B'),
+  };
+  return rgb;
+}
+
+function normalizeOptionalRgb(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  try {
+    return normalizeRgb(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRgbChannel(value, channel) {
+  const number = Number(value);
+
+  if (!Number.isInteger(number) || number < 0 || number > 255) {
+    throw new HttpError(`O canal ${channel} deve ser um número inteiro entre 0 e 255.`, 400);
+  }
+
+  return number;
+}
+
+function rgbToHex(rgb) {
+  return `#${[rgb.r, rgb.g, rgb.b].map((value) => value.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+}
+
+function normalizeHex(value, optional = false) {
+  const hex = String(value || '').trim().toUpperCase();
+
+  if (!hex && optional) {
+    return '';
+  }
+
+  if (!/^#[0-9A-F]{6}$/.test(hex)) {
+    throw new HttpError('HEX inválido.', 400);
+  }
+
+  return hex;
+}
+
+function normalizeWhitespace(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function normalizeColorName(value) {
+  return normalizeWhitespace(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+async function attachCatalogColors(products) {
+  const colorsCollection = await getColorsCollection();
+  const catalogColors = await colorsCollection.find({}, { projection: { _id: 0 } }).toArray();
+  const colorsByName = new Map(catalogColors.map((color) => [color.normalizedName, color]));
+  const aliases = new Map([
+    ['preta', 'preto'],
+    ['branca', 'branco'],
+    ['verde', 'verde bandeira'],
+    ['cinza', 'cinza mescla'],
+  ]);
+
+  const resolveColor = (name) => {
+    const normalizedName = normalizeColorName(name);
+    return colorsByName.get(aliases.get(normalizedName) || normalizedName);
+  };
+
+  return products.map((product) => {
+    const sourceVariations = Array.isArray(product.colors) && product.colors.length > 0
+      ? product.colors
+      : [{
+          id: product.id,
+          color: product.color,
+          colorId: product.colorId,
+          colorHex: product.colorHex,
+          colorRgb: product.colorRgb,
+          image: product.image,
+          imageBack: product.imageBack,
+        }];
+    const colors = sourceVariations.map((variation) => {
+      const catalogColor = variation.colorId
+        ? catalogColors.find((color) => color.id === variation.colorId)
+        : resolveColor(variation.color);
+
+      return catalogColor
+        ? {
+            ...variation,
+            color: catalogColor.name,
+            colorId: catalogColor.id,
+            colorHex: catalogColor.hex,
+            colorRgb: catalogColor.rgb,
+          }
+        : variation;
+    });
+    const primaryColor = colors[0];
+
+    return {
+      ...product,
+      color: primaryColor?.color || product.color,
+      colorId: primaryColor?.colorId || product.colorId || '',
+      colorHex: primaryColor?.colorHex || product.colorHex || '',
+      colorRgb: primaryColor?.colorRgb || product.colorRgb || null,
+      colors,
+    };
+  });
 }
 
 const DEFAULT_STORE = {

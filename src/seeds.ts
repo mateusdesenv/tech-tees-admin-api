@@ -17,6 +17,7 @@ export function createSeedProducts(): Product[] {
       sku: 'TT-DEV-001',
       color: 'Preta',
       sizes: ['P', 'M', 'G', 'GG'],
+      genders: ['Masculino', 'Feminino'],
       image: 'assets/products/nao-e-bug-feature.webp',
       description: 'Camiseta preta com frase dev para quem transforma problemas em funcionalidades.',
       tags: ['dev', 'programação', 'humor'],
