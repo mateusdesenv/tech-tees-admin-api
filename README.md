@@ -91,7 +91,7 @@ MERCADO_PAGO_ACCESS_TOKEN=APP_USR-ou-TEST-...
 API_BASE_URL=https://sua-api.vercel.app
 APP_BASE_URL=https://sua-api.vercel.app
 ECOMMERCE_BASE_URL=https://sua-loja.vercel.app
-CORS_ORIGIN=https://url-do-admin.vercel.app
+CORS_ORIGINS=https://hml.admin.techtees.online,https://admin.techtees.online,http://localhost:4200,http://localhost:5173
 ```
 
 Variáveis opcionais:
@@ -109,7 +109,9 @@ MAX_IMPORT_PRODUCTS=1000
 - `GET /products` é público para o e-commerce.
 - Criar, editar, excluir, importar, exportar, duplicar e alterar status exigem `Authorization: Bearer <token>`.
 - `GET /health` não exige token.
-- `CORS_ORIGIN` aceita uma ou mais origens separadas por vírgula.
+- `CORS_ORIGINS` aceita uma ou mais origens separadas por vírgula. `CORS_ORIGIN` continua aceito por compatibilidade.
+- Na Vercel, cadastre `CORS_ORIGINS` separadamente nos ambientes Preview/HML e Production.
+- O domínio da API usado pelo navegador não pode exigir Vercel Authentication/Deployment Protection, pois essa camada intercepta o `OPTIONS` antes da função. Desative a proteção para o domínio HML da API ou configure uma exceção que permita preflight público.
 - `AUTO_SEED=false` impede a API de recriar o produto seed quando a coleção estiver vazia.
 - `MAX_BODY_BYTES` limita o tamanho do JSON recebido. A recomendação é não enviar imagens grandes em base64.
 

@@ -72,23 +72,29 @@ export function sendError(response: ServerResponse, error: unknown, request?: In
 
 function createCorsHeaders(request?: IncomingMessage): Record<string, string> {
   const requestOrigin = request?.headers.origin;
-  const configuredOrigins = String(process.env.CORS_ORIGIN || '')
+  const configuredOrigins = String(
+    process.env.CORS_ORIGINS
+    || process.env.CORS_ORIGIN
+    || [
+      'https://hml.admin.techtees.online',
+      'https://admin.techtees.online',
+      'http://localhost:4200',
+      'http://localhost:5173',
+    ].join(','),
+  )
     .split(',')
-    .map((origin) => origin.trim())
+    .map((origin) => origin.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
-  let allowOrigin = '*';
-
-  if (configuredOrigins.length > 0) {
-    allowOrigin = requestOrigin && configuredOrigins.includes(requestOrigin)
-      ? requestOrigin
-      : configuredOrigins[0];
-  }
+  const normalizedRequestOrigin = String(requestOrigin || '').trim().replace(/\/+$/, '');
+  const allowOrigin = configuredOrigins.includes(normalizedRequestOrigin)
+    ? normalizedRequestOrigin
+    : configuredOrigins[0];
 
   return {
     'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };

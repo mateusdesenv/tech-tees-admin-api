@@ -6,10 +6,33 @@ const PRODUCT_CATEGORIES = ['Dev', 'Designer', 'Audiovisual', 'Marketing', 'Game
 const DEFAULT_IMAGE = 'assets/products/nao-e-bug-feature.webp';
 const DEFAULT_COLOR = 'Preta';
 const TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 7;
+const DEFAULT_CORS_ORIGINS = [
+  'https://hml.admin.techtees.online',
+  'https://admin.techtees.online',
+  'http://localhost:4200',
+  'http://localhost:5173',
+];
+const INITIAL_COLORS = [
+  ['Preto', 15, 15, 15],
+  ['Branco', 255, 255, 255],
+  ['Cinza Mescla', 176, 178, 176],
+  ['Azul Royal', 0, 83, 160],
+  ['Azul Marinho', 8, 35, 73],
+  ['Verde Bandeira', 0, 118, 61],
+  ['Amarelo Canário', 255, 232, 0],
+  ['Amarelo Ouro', 245, 176, 37],
+  ['Laranja', 241, 105, 35],
+  ['Vermelho', 213, 28, 41],
+  ['Vinho', 115, 18, 37],
+  ['Rosa Pink', 232, 0, 123],
+];
 
 let mongoClientPromise = null;
+const requestByResponse = new WeakMap();
 
 export default async function handler(request, response) {
+  requestByResponse.set(response, request);
+
   try {
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
     const segments = url.pathname.split('/').filter(Boolean);
@@ -1601,14 +1624,14 @@ function toStringArray(value) {
 
 function sendJson(response, statusCode, body) {
   response.writeHead(statusCode, {
-    ...createCorsHeaders(),
+    ...createCorsHeaders(response),
     'Content-Type': 'application/json; charset=utf-8',
   });
   response.end(JSON.stringify(body));
 }
 
 function sendEmpty(response, statusCode) {
-  response.writeHead(statusCode, createCorsHeaders());
+  response.writeHead(statusCode, createCorsHeaders(response));
   response.end();
 }
 
@@ -1623,12 +1646,27 @@ function sendError(response, error) {
   return sendJson(response, statusCode, { error: message });
 }
 
-function createCorsHeaders() {
+function createCorsHeaders(response) {
+  const requestOrigin = String(requestByResponse.get(response)?.headers?.origin || '').trim();
+  const configuredOrigins = String(
+    process.env.CORS_ORIGINS
+    || process.env.CORS_ORIGIN
+    || DEFAULT_CORS_ORIGINS.join(','),
+  )
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+  const normalizedRequestOrigin = requestOrigin.replace(/\/+$/, '');
+  const allowOrigin = configuredOrigins.includes(normalizedRequestOrigin)
+    ? normalizedRequestOrigin
+    : configuredOrigins[0];
+
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept',
     'Access-Control-Max-Age': '86400',
+    Vary: 'Origin',
   };
 }
 
