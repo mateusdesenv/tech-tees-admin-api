@@ -27,6 +27,7 @@ export interface Product {
   sku: string;
   color: string;
   sizes: string[];
+  genders: string[];
   image: string;
   description: string;
   tags: string[];
@@ -177,7 +178,8 @@ export function normalizeProduct(
     stock,
     sku: String(input?.sku ?? '').trim() || generateSku(),
     color: String(input?.color ?? '').trim() || DEFAULT_COLOR,
-    sizes: toStringArray(input?.sizes),
+    sizes: toStringArray(input?.sizes).length ? toStringArray(input?.sizes) : ['P', 'M', 'G'],
+    genders: toStringArray(input?.genders).length ? toStringArray(input?.genders) : ['Masculino', 'Feminino'],
     image: String(input?.image ?? '').trim() || DEFAULT_IMAGE,
     description: String(input?.description ?? '').trim(),
     tags: toStringArray(input?.tags),
