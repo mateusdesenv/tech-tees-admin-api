@@ -2270,17 +2270,24 @@ function createCorsHeaders(response) {
     .map((origin) => origin.trim().replace(/\/+$/, ''))
     .filter(Boolean);
   const normalizedRequestOrigin = requestOrigin.replace(/\/+$/, '');
-  const allowOrigin = configuredOrigins.includes(normalizedRequestOrigin)
-    ? normalizedRequestOrigin
-    : configuredOrigins[0];
-
-  return {
-    'Access-Control-Allow-Origin': allowOrigin,
+  const allowAnyOrigin = configuredOrigins.includes('*');
+  const allowOrigin = allowAnyOrigin
+    ? '*'
+    : configuredOrigins.includes(normalizedRequestOrigin)
+      ? normalizedRequestOrigin
+      : '';
+  const headers = {
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };
+
+  if (allowOrigin) {
+    headers['Access-Control-Allow-Origin'] = allowOrigin;
+  }
+
+  return headers;
 }
 
 class HttpError extends Error {

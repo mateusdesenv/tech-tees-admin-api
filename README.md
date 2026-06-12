@@ -92,6 +92,8 @@ API_BASE_URL=https://sua-api.vercel.app
 APP_BASE_URL=https://sua-api.vercel.app
 ECOMMERCE_BASE_URL=https://sua-loja.vercel.app
 CORS_ORIGINS=https://hml.admin.techtees.online,https://admin.techtees.online,http://localhost:4200,http://localhost:5173
+FIREBASE_API_KEY=chave-publica-web-do-mesmo-projeto-firebase-do-admin
+AUTHORIZED_ADMIN_EMAILS=admin@exemplo.com
 ```
 
 Variáveis opcionais:
@@ -111,6 +113,8 @@ MAX_IMPORT_PRODUCTS=1000
 - `GET /health` não exige token.
 - `CORS_ORIGINS` aceita uma ou mais origens separadas por vírgula. `CORS_ORIGIN` continua aceito por compatibilidade.
 - Na Vercel, cadastre `CORS_ORIGINS` separadamente nos ambientes Preview/HML e Production.
+- O login Google exige `FIREBASE_API_KEY` no ambiente da API e o mesmo projeto Firebase configurado no Admin.
+- `AUTHORIZED_ADMIN_EMAILS` deve conter os e-mails que podem acessar o painel, separados por vírgula.
 - O domínio da API usado pelo navegador não pode exigir Vercel Authentication/Deployment Protection, pois essa camada intercepta o `OPTIONS` antes da função. Desative a proteção para o domínio HML da API ou configure uma exceção que permita preflight público.
 - `AUTO_SEED=false` impede a API de recriar o produto seed quando a coleção estiver vazia.
 - `MAX_BODY_BYTES` limita o tamanho do JSON recebido. A recomendação é não enviar imagens grandes em base64.
