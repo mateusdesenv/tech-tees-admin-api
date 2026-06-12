@@ -22,6 +22,9 @@ export interface Product {
   sizes: string[];
   genders: string[];
   image: string;
+  imageBack?: string;
+  imageFemale?: string;
+  imageBackFemale?: string;
   description: string;
   tags: string[];
   rating: number;
@@ -148,8 +151,8 @@ export function normalizeProduct(
   const categoryIds = toUniqueStringArray(input?.categoryIds).length
     ? toUniqueStringArray(input?.categoryIds)
     : toUniqueStringArray(existingProduct?.categoryIds);
-  const category = String(input?.category ?? existingProduct?.category ?? categories[0] ?? 'Dev').trim() || 'Dev';
-  const productCategories = categories.length ? categories : [category];
+  const category = String(input?.category ?? existingProduct?.category ?? categories[0] ?? '').trim();
+  const productCategories = categories.length ? categories : category ? [category] : [];
 
   const status = input?.status ?? existingProduct?.status ?? 'draft';
   if (!isProductStatus(status)) {
@@ -186,6 +189,9 @@ export function normalizeProduct(
     sizes: toStringArray(input?.sizes).length ? toStringArray(input?.sizes) : ['P', 'M', 'G'],
     genders: toStringArray(input?.genders).length ? toStringArray(input?.genders) : ['Masculino', 'Feminino'],
     image: String(input?.image ?? '').trim() || DEFAULT_IMAGE,
+    imageBack: String(input?.imageBack ?? existingProduct?.imageBack ?? '').trim(),
+    imageFemale: String(input?.imageFemale ?? existingProduct?.imageFemale ?? '').trim(),
+    imageBackFemale: String(input?.imageBackFemale ?? existingProduct?.imageBackFemale ?? '').trim(),
     description: String(input?.description ?? '').trim(),
     tags: toStringArray(input?.tags),
     rating,

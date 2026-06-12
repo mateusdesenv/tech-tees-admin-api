@@ -38,7 +38,6 @@ async function createProductsServiceConnection(): Promise<ProductsServiceConnect
     uri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017',
     dbName: process.env.MONGODB_DB || 'tech-tees-admin',
     collectionName: process.env.MONGODB_COLLECTION || 'products',
-    autoSeed: process.env.AUTO_SEED !== 'false',
   });
 
   return {

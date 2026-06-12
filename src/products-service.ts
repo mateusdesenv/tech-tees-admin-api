@@ -7,7 +7,6 @@ import {
 } from './product-contract.js';
 import type { Product, ProductInput, ProductsExport } from './product-contract.js';
 import type { ProductRepository } from './product-repository.js';
-import { createSeedProducts } from './seeds.js';
 
 const DEFAULT_MAX_IMPORT_PRODUCTS = 1000;
 
@@ -91,13 +90,6 @@ export class ProductsService {
     await this.repository.replace(id, updated);
 
     return updated;
-  }
-
-  async resetSeed(): Promise<Product[]> {
-    const products = createSeedProducts();
-    this.assertUniqueProductList(products);
-    await this.repository.replaceAll(products);
-    return products;
   }
 
   async export(): Promise<ProductsExport> {

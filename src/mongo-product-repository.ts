@@ -1,7 +1,6 @@
 import { MongoClient, type Collection, type Document } from 'mongodb';
 import type { Product } from './product-contract.js';
 import type { ProductRepository } from './product-repository.js';
-import { createSeedProducts } from './seeds.js';
 
 type ProductDocument = Product & {
   position: number;
@@ -18,7 +17,6 @@ export class MongoProductRepository implements ProductRepository {
     uri: string;
     dbName: string;
     collectionName: string;
-    autoSeed: boolean;
   }): Promise<{ repository: MongoProductRepository; client: MongoClient }> {
     const client = new MongoClient(options.uri);
     await client.connect();
@@ -33,10 +31,6 @@ export class MongoProductRepository implements ProductRepository {
     await collection.createIndex({ position: -1 });
 
     const repository = new MongoProductRepository(collection);
-
-    if (options.autoSeed) {
-      await repository.seedIfEmpty();
-    }
 
     return { repository, client };
   }
@@ -91,14 +85,6 @@ export class MongoProductRepository implements ProductRepository {
     );
   }
 
-  private async seedIfEmpty(): Promise<void> {
-    if (await this.collection.countDocuments({}, { limit: 1 })) {
-      return;
-    }
-
-    await this.replaceAll(createSeedProducts());
-  }
-
   private async nextPosition(): Promise<number> {
     const [latest] = await this.collection
       .find({}, { projection: { position: 1 } })
@@ -127,6 +113,9 @@ function toProduct(document: ProductDocument | Document): Product {
     sizes,
     genders,
     image,
+    imageBack,
+    imageFemale,
+    imageBackFemale,
     description,
     tags,
     rating,
@@ -143,7 +132,7 @@ function toProduct(document: ProductDocument | Document): Product {
     slug,
     category,
     categoryIds: Array.isArray(categoryIds) ? categoryIds : [],
-    categories: Array.isArray(categories) && categories.length ? categories : [category],
+    categories: Array.isArray(categories) && categories.length ? categories : category ? [category] : [],
     price,
     compareAtPrice,
     cost,
@@ -153,6 +142,9 @@ function toProduct(document: ProductDocument | Document): Product {
     sizes,
     genders,
     image,
+    imageBack,
+    imageFemale,
+    imageBackFemale,
     description,
     tags,
     rating,

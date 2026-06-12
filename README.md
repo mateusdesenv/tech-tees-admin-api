@@ -91,7 +91,7 @@ MERCADO_PAGO_ACCESS_TOKEN=APP_USR-ou-TEST-...
 API_BASE_URL=https://sua-api.vercel.app
 APP_BASE_URL=https://sua-api.vercel.app
 ECOMMERCE_BASE_URL=https://sua-loja.vercel.app
-CORS_ORIGINS=https://hml.admin.techtees.online,https://admin.techtees.online,http://localhost:4200,http://localhost:5173
+CORS_ORIGINS=https://hml.admin.techtees.online,https://admin.techtees.online,https://hml.techtees.online,https://techtees.online,https://www.techtees.online,http://localhost:4200,http://localhost:5173
 FIREBASE_API_KEY=chave-publica-web-do-mesmo-projeto-firebase-do-admin
 AUTHORIZED_ADMIN_EMAILS=admin@exemplo.com
 ```
@@ -101,7 +101,6 @@ Variáveis opcionais:
 ```txt
 PORT=3000
 HOST=127.0.0.1
-AUTO_SEED=true
 MAX_BODY_BYTES=1000000
 MAX_IMPORT_PRODUCTS=1000
 ```
@@ -116,7 +115,6 @@ MAX_IMPORT_PRODUCTS=1000
 - O login Google exige `FIREBASE_API_KEY` no ambiente da API e o mesmo projeto Firebase configurado no Admin.
 - `AUTHORIZED_ADMIN_EMAILS` deve conter os e-mails que podem acessar o painel, separados por vírgula.
 - O domínio da API usado pelo navegador não pode exigir Vercel Authentication/Deployment Protection, pois essa camada intercepta o `OPTIONS` antes da função. Desative a proteção para o domínio HML da API ou configure uma exceção que permita preflight público.
-- `AUTO_SEED=false` impede a API de recriar o produto seed quando a coleção estiver vazia.
 - `MAX_BODY_BYTES` limita o tamanho do JSON recebido. A recomendação é não enviar imagens grandes em base64.
 
 ## Endpoints
@@ -126,6 +124,7 @@ MAX_IMPORT_PRODUCTS=1000
 - `POST /auth/login`
 - `GET /auth/me`
 - `GET /stores`
+- `GET /orders/mine` (token Firebase do cliente)
 - `POST /stores`
 - `PUT /stores/:id`
 - `PATCH /stores/:id`
@@ -137,7 +136,6 @@ MAX_IMPORT_PRODUCTS=1000
 - `POST /products`
 - `GET /products/export`
 - `POST /products/import`
-- `POST /products/reset-seed`
 - `GET /products/:id`
 - `PUT /products/:id`
 - `PATCH /products/:id`

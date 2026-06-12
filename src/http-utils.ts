@@ -78,6 +78,9 @@ function createCorsHeaders(request?: IncomingMessage): Record<string, string> {
     || [
       'https://hml.admin.techtees.online',
       'https://admin.techtees.online',
+      'https://hml.techtees.online',
+      'https://techtees.online',
+      'https://www.techtees.online',
       'http://localhost:4200',
       'http://localhost:5173',
     ].join(','),
