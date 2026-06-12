@@ -87,8 +87,49 @@ export default async function handler(request, response) {
 
     if (segments.length === 1 && request.method === 'GET') {
       const storeId = url.searchParams.get('storeId');
-      const query = storeId ? createStoreProductQuery(storeId) : {};
-      const products = await collection.find(query, { projection: { _id: 0 } }).sort({ position: -1 }).toArray();
+      const categoryId = url.searchParams.get('categoryId');
+      const status = url.searchParams.get('status');
+      const page = readPositiveInteger(url.searchParams.get('page'), 1);
+      const requestedLimit = readPositiveInteger(url.searchParams.get('limit'), 0);
+      const limit = requestedLimit ? Math.min(requestedLimit, 100) : 0;
+      const filters = [];
+
+      if (storeId) {
+        filters.push(createStoreProductQuery(storeId));
+      }
+
+      if (status) {
+        if (!PRODUCT_STATUSES.includes(status)) {
+          throw new HttpError(`Status inválido. Use um destes valores: ${PRODUCT_STATUSES.join(', ')}.`, 400);
+        }
+        filters.push({ status });
+      }
+
+      if (categoryId) {
+        const categories = await getCategoriesCollection();
+        const category = await categories.findOne({ id: categoryId }, { projection: { _id: 0, id: 1, name: 1 } });
+
+        if (!category) {
+          return sendJson(response, 200, []);
+        }
+
+        filters.push({
+          $or: [
+            { categoryIds: category.id },
+            { category: category.name },
+            { categories: category.name },
+          ],
+        });
+      }
+
+      const query = filters.length > 1 ? { $and: filters } : filters[0] || {};
+      let cursor = collection.find(query, { projection: { _id: 0 } }).sort({ position: -1, createdAt: -1, id: 1 });
+
+      if (limit) {
+        cursor = cursor.skip((page - 1) * limit).limit(limit);
+      }
+
+      const products = await cursor.toArray();
       return sendJson(response, 200, await attachCatalogColors(products));
     }
 
@@ -1483,6 +1524,9 @@ function normalizeProduct(input = {}, existingProduct = null) {
     : toUniqueStringArray(existingProduct?.categories).length
       ? toUniqueStringArray(existingProduct.categories)
       : [];
+  const categoryIds = toUniqueStringArray(input.categoryIds).length
+    ? toUniqueStringArray(input.categoryIds)
+    : toUniqueStringArray(existingProduct?.categoryIds);
   const category = normalizeWhitespace(input.category || existingProduct?.category || categories[0] || 'Dev');
   const productCategories = categories.length ? categories : [category];
 
@@ -1510,6 +1554,7 @@ function normalizeProduct(input = {}, existingProduct = null) {
     name,
     slug: slugInput || createSlug(name),
     category: productCategories[0] || category,
+    categoryIds,
     categories: productCategories,
     price: toNumber(input.price, 0),
     compareAtPrice: toNullableNumber(input.compareAtPrice),
@@ -1964,7 +2009,20 @@ async function requirePasswordConfirmation(request, user) {
   const password = String(payload.password || '').trim();
 
   if (!password) {
-    throw new HttpError('Informe sua senha para confirmar a exclusão.', 400);
+    throw new HttpError(
+      user.provider === 'google'
+        ? 'Informe seu e-mail para confirmar a exclusão.'
+        : 'Informe sua senha para confirmar a exclusão.',
+      400,
+    );
+  }
+
+  if (user.provider === 'google') {
+    if (normalizeEmail(password) !== normalizeEmail(user.email)) {
+      throw new HttpError('E-mail inválido. Exclusão cancelada.', 403);
+    }
+
+    return;
   }
 
   if (!verifyPassword(password, user.passwordHash)) {
@@ -2145,6 +2203,11 @@ function generateSku() {
 function toNumber(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function readPositiveInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
 function toNullableNumber(value) {

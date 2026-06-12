@@ -1,14 +1,5 @@
 export const PRODUCT_STATUSES = ['active', 'draft', 'archived'] as const;
 
-export const PRODUCT_CATEGORIES = [
-  'Dev',
-  'Designer',
-  'Audiovisual',
-  'Marketing',
-  'Gamer',
-  'Outras Profissões',
-] as const;
-
 export const DEFAULT_IMAGE = 'assets/products/nao-e-bug-feature.webp';
 export const DEFAULT_COLOR = 'Preta';
 
@@ -20,6 +11,7 @@ export interface Product {
   name: string;
   slug: string;
   category: ProductCategory;
+  categoryIds?: string[];
   categories: ProductCategory[];
   price: number;
   compareAtPrice: number | null;
@@ -153,6 +145,9 @@ export function normalizeProduct(
     : toUniqueStringArray(existingProduct?.categories).length
       ? toUniqueStringArray(existingProduct?.categories)
       : [];
+  const categoryIds = toUniqueStringArray(input?.categoryIds).length
+    ? toUniqueStringArray(input?.categoryIds)
+    : toUniqueStringArray(existingProduct?.categoryIds);
   const category = String(input?.category ?? existingProduct?.category ?? categories[0] ?? 'Dev').trim() || 'Dev';
   const productCategories = categories.length ? categories : [category];
 
@@ -180,6 +175,7 @@ export function normalizeProduct(
     name,
     slug,
     category: productCategories[0] || category,
+    categoryIds,
     categories: productCategories,
     price,
     compareAtPrice,
