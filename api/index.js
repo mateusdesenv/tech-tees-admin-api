@@ -245,6 +245,36 @@ export default async function handler(request, response) {
 }
 
 async function handleAuthRoutes(request, response, segments) {
+  if (segments.length === 2 && segments[1] === 'google' && request.method === 'POST') {
+    const payload = await readJson(request);
+    const firebaseUser = await verifyFirebaseIdToken(String(payload.idToken || ''));
+    const email = normalizeEmail(firebaseUser.email);
+
+    if (!isAuthorizedAdminEmail(email)) {
+      throw new HttpError('Usuário não autorizado para acessar o painel administrativo.', 403);
+    }
+
+    const users = await getUsersCollection();
+    const now = new Date().toISOString();
+    const existingUser = await users.findOne({ email });
+    const user = {
+      ...(existingUser || {}),
+      id: existingUser?.id || generateId(),
+      name: String(firebaseUser.displayName || existingUser?.name || email.split('@')[0]),
+      email,
+      firebaseUid: String(firebaseUser.localId || ''),
+      photoURL: String(firebaseUser.photoUrl || ''),
+      provider: 'google',
+      role: existingUser?.role || 'admin',
+      status: 'active',
+      createdAt: existingUser?.createdAt || now,
+      updatedAt: now,
+    };
+
+    await users.replaceOne({ email }, user, { upsert: true });
+    return sendJson(response, 200, createAuthResponse(user));
+  }
+
   if (segments.length === 2 && segments[1] === 'register' && request.method === 'POST') {
     const payload = await readJson(request);
     const users = await getUsersCollection();
@@ -535,8 +565,17 @@ async function handleColorRoutes(request, response, segments) {
 
 
 async function handleCategoryRoutes(request, response, segments) {
-  const user = await requireAuth(request);
   const categories = await getCategoriesCollection();
+
+  if (segments.length === 2 && segments[1] === 'public' && request.method === 'GET') {
+    const items = await categories
+      .find({ active: { $ne: false } }, { projection: { _id: 0 } })
+      .sort({ name: 1 })
+      .toArray();
+    return sendJson(response, 200, items);
+  }
+
+  const user = await requireAuth(request);
 
   if (segments.length === 1 && request.method === 'GET') {
     const items = await categories.find({}, { projection: { _id: 0 } }).sort({ name: 1 }).toArray();
@@ -1945,7 +1984,46 @@ function toPublicUser(user) {
     id: user.id,
     name: user.name,
     email: user.email,
+    photoURL: user.photoURL || '',
   };
+}
+
+async function verifyFirebaseIdToken(idToken) {
+  const apiKey = String(process.env.FIREBASE_API_KEY || '').trim();
+
+  if (!apiKey) {
+    throw new HttpError('FIREBASE_API_KEY não configurada na API.', 503);
+  }
+
+  if (!idToken) {
+    throw new HttpError('Token do Firebase não informado.', 400);
+  }
+
+  const firebaseResponse = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    },
+  );
+  const responseBody = await firebaseResponse.json().catch(() => ({}));
+  const firebaseUser = Array.isArray(responseBody.users) ? responseBody.users[0] : null;
+
+  if (!firebaseResponse.ok || !firebaseUser?.localId || !firebaseUser?.email) {
+    throw new HttpError('Não foi possível validar sua conta Google.', 401);
+  }
+
+  return firebaseUser;
+}
+
+function isAuthorizedAdminEmail(email) {
+  const authorizedEmails = String(process.env.AUTHORIZED_ADMIN_EMAILS || '')
+    .split(',')
+    .map(normalizeEmail)
+    .filter(Boolean);
+
+  return authorizedEmails.includes(normalizeEmail(email));
 }
 
 function createToken(user) {
