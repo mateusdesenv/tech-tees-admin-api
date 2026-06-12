@@ -13,13 +13,14 @@ export const DEFAULT_IMAGE = 'assets/products/nao-e-bug-feature.webp';
 export const DEFAULT_COLOR = 'Preta';
 
 export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
-export type ProductCategory = (typeof PRODUCT_CATEGORIES)[number];
+export type ProductCategory = string;
 
 export interface Product {
   id: string;
   name: string;
   slug: string;
   category: ProductCategory;
+  categories: ProductCategory[];
   price: number;
   compareAtPrice: number | null;
   cost: number | null;
@@ -108,6 +109,10 @@ export function toStringArray(value: unknown): string[] {
   return [];
 }
 
+export function toUniqueStringArray(value: unknown): string[] {
+  return [...new Set(toStringArray(value).map((item) => String(item).trim()).filter(Boolean))];
+}
+
 export function toBoolean(value: unknown, fallback = false): boolean {
   if (typeof value === 'boolean') {
     return value;
@@ -143,10 +148,13 @@ export function normalizeProduct(
     throw validationError('O campo "name" é obrigatório.');
   }
 
-  const category = input?.category ?? existingProduct?.category ?? 'Dev';
-  if (!isProductCategory(category)) {
-    throw validationError(`Categoria inválida. Use um destes valores: ${PRODUCT_CATEGORIES.join(', ')}.`);
-  }
+  const categories = toUniqueStringArray(input?.categories).length
+    ? toUniqueStringArray(input?.categories)
+    : toUniqueStringArray(existingProduct?.categories).length
+      ? toUniqueStringArray(existingProduct?.categories)
+      : [];
+  const category = String(input?.category ?? existingProduct?.category ?? categories[0] ?? 'Dev').trim() || 'Dev';
+  const productCategories = categories.length ? categories : [category];
 
   const status = input?.status ?? existingProduct?.status ?? 'draft';
   if (!isProductStatus(status)) {
@@ -171,7 +179,8 @@ export function normalizeProduct(
     id: String(existingProduct?.id ?? input?.id ?? generateId()),
     name,
     slug,
-    category,
+    category: productCategories[0] || category,
+    categories: productCategories,
     price,
     compareAtPrice,
     cost,
@@ -263,10 +272,6 @@ function readNonNegativeInteger(value: unknown, field: string, fallback: number)
   }
 
   return number;
-}
-
-function isProductCategory(value: unknown): value is ProductCategory {
-  return PRODUCT_CATEGORIES.includes(value as ProductCategory);
 }
 
 function isProductStatus(value: unknown): value is ProductStatus {

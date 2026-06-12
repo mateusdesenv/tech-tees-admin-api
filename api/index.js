@@ -26,6 +26,7 @@ const INITIAL_COLORS = [
   ['Vinho', 115, 18, 37],
   ['Rosa Pink', 232, 0, 123],
 ];
+const INITIAL_CATEGORIES = PRODUCT_CATEGORIES;
 
 let mongoClientPromise = null;
 const requestByResponse = new WeakMap();
@@ -63,6 +64,10 @@ export default async function handler(request, response) {
 
     if (segments[0] === 'colors') {
       return await handleColorRoutes(request, response, segments);
+    }
+
+    if (segments[0] === 'categories') {
+      return await handleCategoryRoutes(request, response, segments);
     }
 
     if (segments[0] === 'admin') {
@@ -528,6 +533,76 @@ async function handleColorRoutes(request, response, segments) {
   return sendJson(response, 405, { error: 'Método não permitido para esta rota.' });
 }
 
+
+async function handleCategoryRoutes(request, response, segments) {
+  const user = await requireAuth(request);
+  const categories = await getCategoriesCollection();
+
+  if (segments.length === 1 && request.method === 'GET') {
+    const items = await categories.find({}, { projection: { _id: 0 } }).sort({ name: 1 }).toArray();
+    return sendJson(response, 200, items);
+  }
+
+  if (segments.length === 1 && request.method === 'POST') {
+    const payload = await readJson(request);
+    const category = normalizeCatalogCategory(payload);
+    await assertUniqueActiveCategoryName(categories, category);
+    await categories.insertOne(category);
+    return sendJson(response, 201, category);
+  }
+
+  const id = decodeURIComponent(segments[1] || '');
+
+  if (!id || segments.length !== 2) {
+    return sendJson(response, 404, { error: 'Categoria não encontrada.' });
+  }
+
+  const existingCategory = await categories.findOne({ id }, { projection: { _id: 0 } });
+
+  if (!existingCategory) {
+    return sendJson(response, 404, { error: 'Categoria não encontrada.' });
+  }
+
+  if (request.method === 'PUT' || request.method === 'PATCH') {
+    const payload = await readJson(request);
+    const category = normalizeCatalogCategory(
+      request.method === 'PATCH' ? { ...existingCategory, ...payload, id } : { ...payload, id },
+      existingCategory,
+    );
+    await assertUniqueActiveCategoryName(categories, category);
+    await categories.replaceOne({ id }, category);
+
+    if (existingCategory.name !== category.name) {
+      const products = await getProductsCollection();
+      await products.updateMany({ category: existingCategory.name }, { $set: { category: category.name } });
+      await products.updateMany({ categories: existingCategory.name }, { $set: { 'categories.$': category.name } });
+    }
+
+    return sendJson(response, 200, category);
+  }
+
+  if (request.method === 'DELETE') {
+    await requirePasswordConfirmation(request, user);
+    const products = await getProductsCollection();
+    const linkedProduct = await products.findOne({
+      $or: [
+        { category: existingCategory.name },
+        { categories: existingCategory.name },
+        { categoryIds: id },
+      ],
+    }, { projection: { _id: 0, id: 1, name: 1 } });
+
+    if (linkedProduct) {
+      throw new HttpError(`A categoria está vinculada ao produto "${linkedProduct.name}". Inative a categoria em vez de excluí-la.`, 409);
+    }
+
+    await categories.deleteOne({ id });
+    return sendEmpty(response, 204);
+  }
+
+  return sendJson(response, 405, { error: 'Método não permitido para esta rota.' });
+}
+
 async function handleAdminRoutes(request, response, segments) {
   const user = await requireAuth(request);
 
@@ -623,6 +698,20 @@ async function getColorsCollection() {
   return collection;
 }
 
+async function getCategoriesCollection() {
+  const client = await getMongoClient();
+  const dbName = process.env.MONGODB_DB || 'tech-tees-admin';
+  const collectionName = process.env.MONGODB_CATEGORIES_COLLECTION || 'categories';
+  const collection = client.db(dbName).collection(collectionName);
+
+  await collection.createIndex({ id: 1 }, { unique: true });
+  await collection.createIndex({ normalizedName: 1 });
+  await collection.createIndex({ slug: 1 });
+  await ensureInitialCategories(collection);
+
+  return collection;
+}
+
 async function getKnownCollection(collectionKey) {
   if (collectionKey === 'products') {
     return await getProductsCollection();
@@ -638,6 +727,10 @@ async function getKnownCollection(collectionKey) {
 
   if (collectionKey === 'orders') {
     return await getOrdersCollection();
+  }
+
+  if (collectionKey === 'categories') {
+    return await getCategoriesCollection();
   }
 
   throw new HttpError('Collection inválida.', 400);
@@ -1346,10 +1439,13 @@ function normalizeProduct(input = {}, existingProduct = null) {
     throw new HttpError('O campo "name" é obrigatório.', 400);
   }
 
-  const category = input.category || existingProduct?.category || 'Dev';
-  if (!PRODUCT_CATEGORIES.includes(category)) {
-    throw new HttpError(`Categoria inválida. Use um destes valores: ${PRODUCT_CATEGORIES.join(', ')}.`, 400);
-  }
+  const categories = toUniqueStringArray(input.categories).length
+    ? toUniqueStringArray(input.categories)
+    : toUniqueStringArray(existingProduct?.categories).length
+      ? toUniqueStringArray(existingProduct.categories)
+      : [];
+  const category = normalizeWhitespace(input.category || existingProduct?.category || categories[0] || 'Dev');
+  const productCategories = categories.length ? categories : [category];
 
   const status = input.status || existingProduct?.status || 'draft';
   if (!PRODUCT_STATUSES.includes(status)) {
@@ -1374,7 +1470,8 @@ function normalizeProduct(input = {}, existingProduct = null) {
     storeId: String(input.storeId || existingProduct?.storeId || DEFAULT_STORE.id),
     name,
     slug: slugInput || createSlug(name),
-    category,
+    category: productCategories[0] || category,
+    categories: productCategories,
     price: toNumber(input.price, 0),
     compareAtPrice: toNullableNumber(input.compareAtPrice),
     cost: toNullableNumber(input.cost),
@@ -1504,6 +1601,70 @@ async function ensureInitialColors(collection) {
   await collection.bulkWrite(operations, { ordered: false });
 }
 
+
+function normalizeCatalogCategory(input = {}, existingCategory = null) {
+  const now = new Date().toISOString();
+  const name = normalizeWhitespace(input.name);
+
+  if (!name) {
+    throw new HttpError('O nome da categoria é obrigatório.', 400);
+  }
+
+  return {
+    id: String(existingCategory?.id || input.id || generateId()),
+    name,
+    slug: createSlug(input.slug || name),
+    normalizedName: normalizeCategoryName(name),
+    active: input.active !== false,
+    createdAt: existingCategory?.createdAt || String(input.createdAt || now),
+    updatedAt: now,
+  };
+}
+
+async function assertUniqueActiveCategoryName(collection, category) {
+  if (!category.active) {
+    return;
+  }
+
+  const duplicate = await collection.findOne({
+    id: { $ne: category.id },
+    normalizedName: category.normalizedName,
+    active: true,
+  });
+
+  if (duplicate) {
+    throw new HttpError(`Já existe uma categoria ativa chamada "${category.name}".`, 409);
+  }
+}
+
+async function ensureInitialCategories(collection) {
+  const now = new Date().toISOString();
+  const operations = INITIAL_CATEGORIES.map((name) => {
+    const normalizedName = normalizeCategoryName(name);
+    return {
+      updateOne: {
+        filter: { normalizedName },
+        update: {
+          $setOnInsert: {
+            id: generateId(),
+            name,
+            slug: createSlug(name),
+            normalizedName,
+            active: true,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+        upsert: true,
+      },
+    };
+  });
+
+  if (operations.length) {
+    await collection.bulkWrite(operations, { ordered: false });
+  }
+}
+
 function normalizeRgb(value = {}) {
   const rgb = {
     r: normalizeRgbChannel(value.r, 'R'),
@@ -1558,6 +1719,13 @@ function normalizeWhitespace(value) {
 }
 
 function normalizeColorName(value) {
+  return normalizeWhitespace(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function normalizeCategoryName(value) {
   return normalizeWhitespace(value)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -1706,6 +1874,7 @@ function createSeedProducts(storeId = DEFAULT_STORE.id) {
       name: 'Camiseta Não é Bug, é Feature',
       slug: 'camiseta-nao-e-bug-e-feature',
       category: 'Dev',
+      categories: ['Dev'],
       price: 89.9,
       compareAtPrice: 119.9,
       cost: 42,
@@ -1919,6 +2088,10 @@ function toStringArray(value) {
   }
 
   return [];
+}
+
+function toUniqueStringArray(value) {
+  return [...new Set(toStringArray(value).map((item) => normalizeWhitespace(item)).filter(Boolean))];
 }
 
 function sendJson(response, statusCode, body) {

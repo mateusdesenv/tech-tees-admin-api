@@ -10,6 +10,7 @@ export function createSeedProducts(): Product[] {
       name: 'Camiseta Não é Bug, é Feature',
       slug: 'camiseta-nao-e-bug-e-feature',
       category: 'Dev',
+      categories: ['Dev'],
       price: 89.9,
       compareAtPrice: 119.9,
       cost: 42,
