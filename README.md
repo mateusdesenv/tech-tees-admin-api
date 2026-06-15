@@ -113,7 +113,7 @@ MAX_IMPORT_PRODUCTS=1000
 - `CORS_ORIGINS` aceita uma ou mais origens separadas por vírgula. `CORS_ORIGIN` continua aceito por compatibilidade.
 - Na Vercel, cadastre `CORS_ORIGINS` separadamente nos ambientes Preview/HML e Production.
 - O login Google exige `FIREBASE_API_KEY` no ambiente da API e o mesmo projeto Firebase configurado no Admin.
-- `AUTHORIZED_ADMIN_EMAILS` deve conter os e-mails que podem acessar o painel, separados por vírgula.
+- `AUTHORIZED_ADMIN_EMAILS` deve conter e-mails adicionais que podem acessar o painel, separados por vírgula. A API também inclui a allowlist bootstrap do projeto para evitar bloqueio quando a variável de HML/produção estiver desatualizada.
 - O domínio da API usado pelo navegador não pode exigir Vercel Authentication/Deployment Protection, pois essa camada intercepta o `OPTIONS` antes da função. Desative a proteção para o domínio HML da API ou configure uma exceção que permita preflight público.
 - `MAX_BODY_BYTES` limita o tamanho do JSON recebido. A recomendação é não enviar imagens grandes em base64.
 

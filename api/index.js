@@ -14,6 +14,11 @@ const DEFAULT_CORS_ORIGINS = [
   'http://localhost:4200',
   'http://localhost:5173',
 ];
+const DEFAULT_AUTHORIZED_ADMIN_EMAILS = [
+  'mateus.desenv@gmail.com',
+  'kaualippert24@gmail.com',
+  'mateusc2001@gmail.com',
+];
 const INITIAL_COLORS = [
   ['Preto', 15, 15, 15],
   ['Branco', 255, 255, 255],
@@ -2061,12 +2066,16 @@ async function verifyFirebaseIdToken(idToken) {
 }
 
 function isAuthorizedAdminEmail(email) {
-  const authorizedEmails = String(process.env.AUTHORIZED_ADMIN_EMAILS || '')
+  const configuredEmails = String(process.env.AUTHORIZED_ADMIN_EMAILS || '')
     .split(',')
     .map(normalizeEmail)
     .filter(Boolean);
+  const authorizedEmails = new Set([
+    ...DEFAULT_AUTHORIZED_ADMIN_EMAILS.map(normalizeEmail),
+    ...configuredEmails,
+  ]);
 
-  return authorizedEmails.includes(normalizeEmail(email));
+  return authorizedEmails.has(normalizeEmail(email));
 }
 
 function createToken(user) {
