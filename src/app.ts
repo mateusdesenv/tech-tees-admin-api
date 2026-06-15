@@ -46,10 +46,6 @@ export function createRequestHandler(productsServiceProvider: ProductsServicePro
         return sendJson(response, 200, await productsService.import(await readJson(request)), request);
       }
 
-      if (segments.length === 2 && segments[1] === 'reset-seed' && request.method === 'POST') {
-        return sendJson(response, 200, await productsService.resetSeed(), request);
-      }
-
       const id = decodeURIComponent(segments[1] ?? '');
 
       if (segments.length === 2 && request.method === 'GET') {

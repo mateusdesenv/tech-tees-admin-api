@@ -2,13 +2,15 @@ import { MongoClient } from 'mongodb';
 import { createHmac, pbkdf2Sync, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const PRODUCT_STATUSES = ['active', 'draft', 'archived'];
-const PRODUCT_CATEGORIES = ['Dev', 'Designer', 'Audiovisual', 'Marketing', 'Gamer', 'Outras Profissões'];
 const DEFAULT_IMAGE = 'assets/products/nao-e-bug-feature.webp';
 const DEFAULT_COLOR = 'Preta';
 const TOKEN_EXPIRES_IN_SECONDS = 60 * 60 * 24 * 7;
 const DEFAULT_CORS_ORIGINS = [
   'https://hml.admin.techtees.online',
   'https://admin.techtees.online',
+  'https://hml.techtees.online',
+  'https://techtees.online',
+  'https://www.techtees.online',
   'http://localhost:4200',
   'http://localhost:5173',
 ];
@@ -65,6 +67,10 @@ export default async function handler(request, response) {
       return await handleColorRoutes(request, response, segments);
     }
 
+    if (segments[0] === 'categories') {
+      return await handleCategoryRoutes(request, response, segments);
+    }
+
     if (segments[0] === 'admin') {
       return await handleAdminRoutes(request, response, segments);
     }
@@ -82,8 +88,49 @@ export default async function handler(request, response) {
 
     if (segments.length === 1 && request.method === 'GET') {
       const storeId = url.searchParams.get('storeId');
-      const query = storeId ? createStoreProductQuery(storeId) : {};
-      const products = await collection.find(query, { projection: { _id: 0 } }).sort({ position: -1 }).toArray();
+      const categoryId = url.searchParams.get('categoryId');
+      const status = url.searchParams.get('status');
+      const page = readPositiveInteger(url.searchParams.get('page'), 1);
+      const requestedLimit = readPositiveInteger(url.searchParams.get('limit'), 0);
+      const limit = requestedLimit ? Math.min(requestedLimit, 100) : 0;
+      const filters = [];
+
+      if (storeId) {
+        filters.push(createStoreProductQuery(storeId));
+      }
+
+      if (status) {
+        if (!PRODUCT_STATUSES.includes(status)) {
+          throw new HttpError(`Status inválido. Use um destes valores: ${PRODUCT_STATUSES.join(', ')}.`, 400);
+        }
+        filters.push({ status });
+      }
+
+      if (categoryId) {
+        const categories = await getCategoriesCollection();
+        const category = await categories.findOne({ id: categoryId }, { projection: { _id: 0, id: 1, name: 1 } });
+
+        if (!category) {
+          return sendJson(response, 200, []);
+        }
+
+        filters.push({
+          $or: [
+            { categoryIds: category.id },
+            { category: category.name },
+            { categories: category.name },
+          ],
+        });
+      }
+
+      const query = filters.length > 1 ? { $and: filters } : filters[0] || {};
+      let cursor = collection.find(query, { projection: { _id: 0 } }).sort({ position: -1, createdAt: -1, id: 1 });
+
+      if (limit) {
+        cursor = cursor.skip((page - 1) * limit).limit(limit);
+      }
+
+      const products = await cursor.toArray();
       return sendJson(response, 200, await attachCatalogColors(products));
     }
 
@@ -110,6 +157,7 @@ export default async function handler(request, response) {
       }
 
       const storeId = url.searchParams.get('storeId') || null;
+      await Promise.all(productsPayload.map((product) => assertProductCategoriesExist(product)));
       const products = productsPayload.map((product) => normalizeProduct({ ...product, storeId: product.storeId || storeId }));
       await collection.deleteMany(storeId ? createStoreProductQuery(storeId) : {});
 
@@ -123,22 +171,10 @@ export default async function handler(request, response) {
       return sendJson(response, 200, products);
     }
 
-    if (segments.length === 2 && segments[1] === 'reset-seed' && request.method === 'POST') {
-      await requireAuth(request);
-      const storeId = url.searchParams.get('storeId') || DEFAULT_STORE.id;
-      const products = createSeedProducts(storeId);
-      await collection.deleteMany(createStoreProductQuery(storeId));
-      await collection.insertMany(products.map((product, index) => ({
-        ...product,
-        position: products.length - index,
-      })));
-
-      return sendJson(response, 200, products);
-    }
-
     if (segments.length === 1 && request.method === 'POST') {
       await requireAuth(request);
       const payload = await readJson(request);
+      await assertProductCategoriesExist(payload);
       const product = normalizeProduct(payload);
       const position = await nextPosition(collection);
 
@@ -214,6 +250,7 @@ export default async function handler(request, response) {
       const nextPayload = request.method === 'PATCH'
         ? { ...existingProduct, ...payload, id }
         : { ...payload, id };
+      await assertProductCategoriesExist(nextPayload);
       const updatedProduct = normalizeProduct(nextPayload, existingProduct);
 
       await collection.replaceOne(
@@ -240,6 +277,36 @@ export default async function handler(request, response) {
 }
 
 async function handleAuthRoutes(request, response, segments) {
+  if (segments.length === 2 && segments[1] === 'google' && request.method === 'POST') {
+    const payload = await readJson(request);
+    const firebaseUser = await verifyFirebaseIdToken(String(payload.idToken || ''));
+    const email = normalizeEmail(firebaseUser.email);
+
+    if (!isAuthorizedAdminEmail(email)) {
+      throw new HttpError('Usuário não autorizado para acessar o painel administrativo.', 403);
+    }
+
+    const users = await getUsersCollection();
+    const now = new Date().toISOString();
+    const existingUser = await users.findOne({ email });
+    const user = {
+      ...(existingUser || {}),
+      id: existingUser?.id || generateId(),
+      name: String(firebaseUser.displayName || existingUser?.name || email.split('@')[0]),
+      email,
+      firebaseUid: String(firebaseUser.localId || ''),
+      photoURL: String(firebaseUser.photoUrl || ''),
+      provider: 'google',
+      role: existingUser?.role || 'admin',
+      status: 'active',
+      createdAt: existingUser?.createdAt || now,
+      updatedAt: now,
+    };
+
+    await users.replaceOne({ email }, user, { upsert: true });
+    return sendJson(response, 200, createAuthResponse(user));
+  }
+
   if (segments.length === 2 && segments[1] === 'register' && request.method === 'POST') {
     const payload = await readJson(request);
     const users = await getUsersCollection();
@@ -392,7 +459,14 @@ async function handleCheckoutRoutes(request, response, segments) {
 
   if (segments.length === 2 && segments[1] === 'process-payment' && request.method === 'POST') {
     const payload = await readJson(request);
-    const payment = await createMercadoPagoPayment(payload);
+    const firebaseUser = await verifyFirebaseIdToken(getBearerToken(request));
+    const payment = await createMercadoPagoPayment({
+      ...payload,
+      customer: {
+        firebaseUid: String(firebaseUser.localId || ''),
+        email: normalizeEmail(firebaseUser.email),
+      },
+    });
     return sendJson(response, 201, payment);
   }
 
@@ -453,6 +527,21 @@ async function fetchMercadoPagoPayment(paymentId) {
 }
 
 async function handleOrderRoutes(request, response, segments) {
+  if (segments.length === 2 && segments[1] === 'mine' && request.method === 'GET') {
+    const firebaseUser = await verifyFirebaseIdToken(getBearerToken(request));
+    const firebaseUid = String(firebaseUser.localId || '');
+    const email = normalizeEmail(firebaseUser.email);
+    const orders = await getOrdersCollection();
+    const items = await orders.find({
+      $or: [
+        { firebaseUid },
+        { customerEmail: email },
+        { payerEmail: { $regex: `^${escapeRegExp(email)}$`, $options: 'i' } },
+      ],
+    }, { projection: { _id: 0 } }).sort({ createdAt: -1 }).toArray();
+    return sendJson(response, 200, items);
+  }
+
   await requireAuth(request);
 
   if (segments.length === 1 && request.method === 'GET') {
@@ -522,6 +611,85 @@ async function handleColorRoutes(request, response, segments) {
     }
 
     await colors.deleteOne({ id });
+    return sendEmpty(response, 204);
+  }
+
+  return sendJson(response, 405, { error: 'Método não permitido para esta rota.' });
+}
+
+
+async function handleCategoryRoutes(request, response, segments) {
+  const categories = await getCategoriesCollection();
+
+  if (segments.length === 2 && segments[1] === 'public' && request.method === 'GET') {
+    const items = await categories
+      .find({ active: { $ne: false } }, { projection: { _id: 0 } })
+      .sort({ name: 1 })
+      .toArray();
+    return sendJson(response, 200, items);
+  }
+
+  const user = await requireAuth(request);
+
+  if (segments.length === 1 && request.method === 'GET') {
+    const items = await categories.find({}, { projection: { _id: 0 } }).sort({ name: 1 }).toArray();
+    return sendJson(response, 200, items);
+  }
+
+  if (segments.length === 1 && request.method === 'POST') {
+    const payload = await readJson(request);
+    const category = normalizeCatalogCategory(payload);
+    await assertUniqueActiveCategoryName(categories, category);
+    await categories.insertOne(category);
+    return sendJson(response, 201, category);
+  }
+
+  const id = decodeURIComponent(segments[1] || '');
+
+  if (!id || segments.length !== 2) {
+    return sendJson(response, 404, { error: 'Categoria não encontrada.' });
+  }
+
+  const existingCategory = await categories.findOne({ id }, { projection: { _id: 0 } });
+
+  if (!existingCategory) {
+    return sendJson(response, 404, { error: 'Categoria não encontrada.' });
+  }
+
+  if (request.method === 'PUT' || request.method === 'PATCH') {
+    const payload = await readJson(request);
+    const category = normalizeCatalogCategory(
+      request.method === 'PATCH' ? { ...existingCategory, ...payload, id } : { ...payload, id },
+      existingCategory,
+    );
+    await assertUniqueActiveCategoryName(categories, category);
+    await categories.replaceOne({ id }, category);
+
+    if (existingCategory.name !== category.name) {
+      const products = await getProductsCollection();
+      await products.updateMany({ category: existingCategory.name }, { $set: { category: category.name } });
+      await products.updateMany({ categories: existingCategory.name }, { $set: { 'categories.$': category.name } });
+    }
+
+    return sendJson(response, 200, category);
+  }
+
+  if (request.method === 'DELETE') {
+    await requirePasswordConfirmation(request, user);
+    const products = await getProductsCollection();
+    const linkedProduct = await products.findOne({
+      $or: [
+        { category: existingCategory.name },
+        { categories: existingCategory.name },
+        { categoryIds: id },
+      ],
+    }, { projection: { _id: 0, id: 1, name: 1 } });
+
+    if (linkedProduct) {
+      throw new HttpError(`A categoria está vinculada ao produto "${linkedProduct.name}". Inative a categoria em vez de excluí-la.`, 409);
+    }
+
+    await categories.deleteOne({ id });
     return sendEmpty(response, 204);
   }
 
@@ -606,6 +774,8 @@ async function getOrdersCollection() {
   await collection.createIndex({ id: 1 }, { unique: true });
   await collection.createIndex({ storeId: 1, createdAt: -1 });
   await collection.createIndex({ externalReference: 1 });
+  await collection.createIndex({ firebaseUid: 1, createdAt: -1 });
+  await collection.createIndex({ customerEmail: 1, createdAt: -1 });
 
   return collection;
 }
@@ -619,6 +789,19 @@ async function getColorsCollection() {
   await collection.createIndex({ id: 1 }, { unique: true });
   await collection.createIndex({ normalizedName: 1 });
   await ensureInitialColors(collection);
+
+  return collection;
+}
+
+async function getCategoriesCollection() {
+  const client = await getMongoClient();
+  const dbName = process.env.MONGODB_DB || 'tech-tees-admin';
+  const collectionName = process.env.MONGODB_CATEGORIES_COLLECTION || 'categories';
+  const collection = client.db(dbName).collection(collectionName);
+
+  await collection.createIndex({ id: 1 }, { unique: true });
+  await collection.createIndex({ normalizedName: 1 });
+  await collection.createIndex({ slug: 1 });
 
   return collection;
 }
@@ -638,6 +821,10 @@ async function getKnownCollection(collectionKey) {
 
   if (collectionKey === 'orders') {
     return await getOrdersCollection();
+  }
+
+  if (collectionKey === 'categories') {
+    return await getCategoriesCollection();
   }
 
   throw new HttpError('Collection inválida.', 400);
@@ -902,6 +1089,8 @@ async function createMercadoPagoPayment(payload = {}) {
     shippingCost,
     totalAmount: transactionAmount,
     storeId: payload.storeId,
+    firebaseUid: payload.customer?.firebaseUid,
+    customerEmail: payload.customer?.email,
   });
 
   const paymentPayload = removeUndefinedValues({
@@ -967,6 +1156,8 @@ async function createMercadoPagoPayment(payload = {}) {
       shippingCost,
       totalAmount: transactionAmount,
       storeId: payload.storeId,
+      firebaseUid: payload.customer?.firebaseUid,
+      customerEmail: payload.customer?.email,
     });
   }
 
@@ -1065,6 +1256,8 @@ async function registerApprovedCheckout(items, orderInput = {}) {
     storeId,
     buyerName: String(orderInput.buyerName || existingOrder?.buyerName || '').trim() || 'Comprador não informado',
     payerEmail: String(orderInput.payerEmail || existingOrder?.payerEmail || '').trim(),
+    firebaseUid: String(orderInput.firebaseUid || existingOrder?.firebaseUid || '').trim(),
+    customerEmail: normalizeEmail(orderInput.customerEmail || existingOrder?.customerEmail || orderInput.payerEmail),
     quantity: orderItems.reduce((totalQuantity, item) => totalQuantity + item.quantity, 0),
     subtotal,
     shipping,
@@ -1119,6 +1312,8 @@ async function upsertCheckoutOrderDraft(items, orderInput = {}) {
         storeId,
         buyerName: String(orderInput.buyerName || '').trim() || 'Comprador não informado',
         payerEmail: String(orderInput.payerEmail || '').trim(),
+        firebaseUid: String(orderInput.firebaseUid || '').trim(),
+        customerEmail: normalizeEmail(orderInput.customerEmail || orderInput.payerEmail),
         quantity: saleItems.reduce((totalQuantity, item) => totalQuantity + item.quantity, 0),
         subtotal,
         shipping,
@@ -1346,10 +1541,16 @@ function normalizeProduct(input = {}, existingProduct = null) {
     throw new HttpError('O campo "name" é obrigatório.', 400);
   }
 
-  const category = input.category || existingProduct?.category || 'Dev';
-  if (!PRODUCT_CATEGORIES.includes(category)) {
-    throw new HttpError(`Categoria inválida. Use um destes valores: ${PRODUCT_CATEGORIES.join(', ')}.`, 400);
-  }
+  const categories = toUniqueStringArray(input.categories).length
+    ? toUniqueStringArray(input.categories)
+    : toUniqueStringArray(existingProduct?.categories).length
+      ? toUniqueStringArray(existingProduct.categories)
+      : [];
+  const categoryIds = toUniqueStringArray(input.categoryIds).length
+    ? toUniqueStringArray(input.categoryIds)
+    : toUniqueStringArray(existingProduct?.categoryIds);
+  const category = normalizeWhitespace(input.category || existingProduct?.category || categories[0] || '');
+  const productCategories = categories.length ? categories : category ? [category] : [];
 
   const status = input.status || existingProduct?.status || 'draft';
   if (!PRODUCT_STATUSES.includes(status)) {
@@ -1365,6 +1566,8 @@ function normalizeProduct(input = {}, existingProduct = null) {
     colorRgb: input.colorRgb || existingProduct?.colorRgb || null,
     image: String(input.image || existingProduct?.image || '').trim() || DEFAULT_IMAGE,
     imageBack: String(input.imageBack || existingProduct?.imageBack || '').trim(),
+    imageFemale: String(input.imageFemale || existingProduct?.imageFemale || '').trim(),
+    imageBackFemale: String(input.imageBackFemale || existingProduct?.imageBackFemale || '').trim(),
   };
   const colors = normalizeProductColors(input, existingProduct, fallbackVariation);
   const primaryVariation = colors[0] || fallbackVariation;
@@ -1374,7 +1577,9 @@ function normalizeProduct(input = {}, existingProduct = null) {
     storeId: String(input.storeId || existingProduct?.storeId || DEFAULT_STORE.id),
     name,
     slug: slugInput || createSlug(name),
-    category,
+    category: productCategories[0] || category,
+    categoryIds,
+    categories: productCategories,
     price: toNumber(input.price, 0),
     compareAtPrice: toNullableNumber(input.compareAtPrice),
     cost: toNullableNumber(input.cost),
@@ -1389,6 +1594,8 @@ function normalizeProduct(input = {}, existingProduct = null) {
     genders: toStringArray(input.genders).length ? toStringArray(input.genders) : ['Masculino', 'Feminino'],
     image: primaryVariation.image,
     imageBack: primaryVariation.imageBack || '',
+    imageFemale: primaryVariation.imageFemale || '',
+    imageBackFemale: primaryVariation.imageBackFemale || '',
     description: String(input.description || '').trim(),
     tags: toStringArray(input.tags),
     rating: Math.min(5, Math.max(0, toNumber(input.rating, 0))),
@@ -1412,7 +1619,12 @@ function normalizeProductColors(input = {}, existingProduct = null, fallbackVari
     ? source.map((variation, index) => normalizeProductColorVariation(variation, fallbackVariation, index))
     : [];
 
-  const validColors = normalizedColors.filter((variation) => variation.color || variation.image || variation.imageBack);
+  const validColors = normalizedColors.filter((variation) =>
+    variation.color
+    || variation.image
+    || variation.imageBack
+    || variation.imageFemale
+    || variation.imageBackFemale);
 
   if (validColors.length === 0) {
     return [normalizeProductColorVariation(fallbackVariation, fallbackVariation, 0)];
@@ -1435,6 +1647,8 @@ function normalizeProductColorVariation(variation = {}, fallbackVariation = {}, 
     colorRgb: normalizeOptionalRgb(variation.colorRgb || (index === 0 ? fallbackVariation.colorRgb : null)),
     image: String(variation.image || (index === 0 ? fallbackVariation.image : '') || '').trim(),
     imageBack: String(variation.imageBack || (index === 0 ? fallbackVariation.imageBack : '') || '').trim(),
+    imageFemale: String(variation.imageFemale || (index === 0 ? fallbackVariation.imageFemale : '') || '').trim(),
+    imageBackFemale: String(variation.imageBackFemale || (index === 0 ? fallbackVariation.imageBackFemale : '') || '').trim(),
   };
 }
 
@@ -1504,6 +1718,60 @@ async function ensureInitialColors(collection) {
   await collection.bulkWrite(operations, { ordered: false });
 }
 
+
+function normalizeCatalogCategory(input = {}, existingCategory = null) {
+  const now = new Date().toISOString();
+  const name = normalizeWhitespace(input.name);
+
+  if (!name) {
+    throw new HttpError('O nome da categoria é obrigatório.', 400);
+  }
+
+  return {
+    id: String(existingCategory?.id || input.id || generateId()),
+    name,
+    slug: createSlug(input.slug || name),
+    normalizedName: normalizeCategoryName(name),
+    active: input.active !== false,
+    createdAt: existingCategory?.createdAt || String(input.createdAt || now),
+    updatedAt: now,
+  };
+}
+
+async function assertUniqueActiveCategoryName(collection, category) {
+  if (!category.active) {
+    return;
+  }
+
+  const duplicate = await collection.findOne({
+    id: { $ne: category.id },
+    normalizedName: category.normalizedName,
+    active: true,
+  });
+
+  if (duplicate) {
+    throw new HttpError(`Já existe uma categoria ativa chamada "${category.name}".`, 409);
+  }
+}
+
+async function assertProductCategoriesExist(input = {}) {
+  const categoryIds = toUniqueStringArray(input.categoryIds);
+
+  if (categoryIds.length === 0) {
+    throw new HttpError('Selecione ao menos uma categoria cadastrada para o produto.', 400);
+  }
+
+  const categories = await getCategoriesCollection();
+  const foundCategories = await categories.countDocuments({
+    id: { $in: categoryIds },
+    active: { $ne: false },
+  });
+
+  if (foundCategories !== categoryIds.length) {
+    throw new HttpError('Uma ou mais categorias selecionadas não existem ou estão inativas.', 400);
+  }
+}
+
 function normalizeRgb(value = {}) {
   const rgb = {
     r: normalizeRgbChannel(value.r, 'R'),
@@ -1558,6 +1826,13 @@ function normalizeWhitespace(value) {
 }
 
 function normalizeColorName(value) {
+  return normalizeWhitespace(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function normalizeCategoryName(value) {
   return normalizeWhitespace(value)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -1696,43 +1971,6 @@ function duplicateProduct(product) {
   };
 }
 
-function createSeedProducts(storeId = DEFAULT_STORE.id) {
-  const now = new Date().toISOString();
-
-  return [
-    {
-      id: generateId(),
-      storeId,
-      name: 'Camiseta Não é Bug, é Feature',
-      slug: 'camiseta-nao-e-bug-e-feature',
-      category: 'Dev',
-      price: 89.9,
-      compareAtPrice: 119.9,
-      cost: 42,
-      stock: 32,
-      sku: 'TT-DEV-001',
-      color: 'Preta',
-      sizes: ['P', 'M', 'G', 'GG'],
-      image: DEFAULT_IMAGE,
-      imageBack: '',
-      colors: [{
-        id: generateId(),
-        color: 'Preta',
-        image: DEFAULT_IMAGE,
-        imageBack: '',
-      }],
-      description: 'Camiseta preta com frase dev para quem transforma problemas em funcionalidades.',
-      tags: ['dev', 'programação', 'humor'],
-      rating: 4.9,
-      sales: 128,
-      featured: true,
-      status: 'active',
-      createdAt: now,
-      updatedAt: now,
-    },
-  ];
-}
-
 async function requireAuth(request) {
   const token = getBearerToken(request);
 
@@ -1756,7 +1994,20 @@ async function requirePasswordConfirmation(request, user) {
   const password = String(payload.password || '').trim();
 
   if (!password) {
-    throw new HttpError('Informe sua senha para confirmar a exclusão.', 400);
+    throw new HttpError(
+      user.provider === 'google'
+        ? 'Informe seu e-mail para confirmar a exclusão.'
+        : 'Informe sua senha para confirmar a exclusão.',
+      400,
+    );
+  }
+
+  if (user.provider === 'google') {
+    if (normalizeEmail(password) !== normalizeEmail(user.email)) {
+      throw new HttpError('E-mail inválido. Exclusão cancelada.', 403);
+    }
+
+    return;
   }
 
   if (!verifyPassword(password, user.passwordHash)) {
@@ -1776,7 +2027,46 @@ function toPublicUser(user) {
     id: user.id,
     name: user.name,
     email: user.email,
+    photoURL: user.photoURL || '',
   };
+}
+
+async function verifyFirebaseIdToken(idToken) {
+  const apiKey = String(process.env.FIREBASE_API_KEY || '').trim();
+
+  if (!apiKey) {
+    throw new HttpError('FIREBASE_API_KEY não configurada na API.', 503);
+  }
+
+  if (!idToken) {
+    throw new HttpError('Token do Firebase não informado.', 400);
+  }
+
+  const firebaseResponse = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    },
+  );
+  const responseBody = await firebaseResponse.json().catch(() => ({}));
+  const firebaseUser = Array.isArray(responseBody.users) ? responseBody.users[0] : null;
+
+  if (!firebaseResponse.ok || !firebaseUser?.localId || !firebaseUser?.email) {
+    throw new HttpError('Não foi possível validar sua conta Google.', 401);
+  }
+
+  return firebaseUser;
+}
+
+function isAuthorizedAdminEmail(email) {
+  const authorizedEmails = String(process.env.AUTHORIZED_ADMIN_EMAILS || '')
+    .split(',')
+    .map(normalizeEmail)
+    .filter(Boolean);
+
+  return authorizedEmails.includes(normalizeEmail(email));
 }
 
 function createToken(user) {
@@ -1871,6 +2161,10 @@ function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function toProduct(document) {
   const { _id, position, ...product } = document;
   return product;
@@ -1900,6 +2194,11 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function readPositiveInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : fallback;
+}
+
 function toNullableNumber(value) {
   if (value === null || value === undefined || value === '') {
     return null;
@@ -1919,6 +2218,10 @@ function toStringArray(value) {
   }
 
   return [];
+}
+
+function toUniqueStringArray(value) {
+  return [...new Set(toStringArray(value).map((item) => normalizeWhitespace(item)).filter(Boolean))];
 }
 
 function sendJson(response, statusCode, body) {
@@ -1956,17 +2259,24 @@ function createCorsHeaders(response) {
     .map((origin) => origin.trim().replace(/\/+$/, ''))
     .filter(Boolean);
   const normalizedRequestOrigin = requestOrigin.replace(/\/+$/, '');
-  const allowOrigin = configuredOrigins.includes(normalizedRequestOrigin)
-    ? normalizedRequestOrigin
-    : configuredOrigins[0];
-
-  return {
-    'Access-Control-Allow-Origin': allowOrigin,
+  const allowAnyOrigin = configuredOrigins.includes('*');
+  const allowOrigin = allowAnyOrigin
+    ? '*'
+    : configuredOrigins.includes(normalizedRequestOrigin)
+      ? normalizedRequestOrigin
+      : '';
+  const headers = {
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };
+
+  if (allowOrigin) {
+    headers['Access-Control-Allow-Origin'] = allowOrigin;
+  }
+
+  return headers;
 }
 
 class HttpError extends Error {

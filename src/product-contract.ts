@@ -1,25 +1,18 @@
 export const PRODUCT_STATUSES = ['active', 'draft', 'archived'] as const;
 
-export const PRODUCT_CATEGORIES = [
-  'Dev',
-  'Designer',
-  'Audiovisual',
-  'Marketing',
-  'Gamer',
-  'Outras Profissões',
-] as const;
-
 export const DEFAULT_IMAGE = 'assets/products/nao-e-bug-feature.webp';
 export const DEFAULT_COLOR = 'Preta';
 
 export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
-export type ProductCategory = (typeof PRODUCT_CATEGORIES)[number];
+export type ProductCategory = string;
 
 export interface Product {
   id: string;
   name: string;
   slug: string;
   category: ProductCategory;
+  categoryIds?: string[];
+  categories: ProductCategory[];
   price: number;
   compareAtPrice: number | null;
   cost: number | null;
@@ -29,6 +22,9 @@ export interface Product {
   sizes: string[];
   genders: string[];
   image: string;
+  imageBack?: string;
+  imageFemale?: string;
+  imageBackFemale?: string;
   description: string;
   tags: string[];
   rating: number;
@@ -108,6 +104,10 @@ export function toStringArray(value: unknown): string[] {
   return [];
 }
 
+export function toUniqueStringArray(value: unknown): string[] {
+  return [...new Set(toStringArray(value).map((item) => String(item).trim()).filter(Boolean))];
+}
+
 export function toBoolean(value: unknown, fallback = false): boolean {
   if (typeof value === 'boolean') {
     return value;
@@ -143,10 +143,16 @@ export function normalizeProduct(
     throw validationError('O campo "name" é obrigatório.');
   }
 
-  const category = input?.category ?? existingProduct?.category ?? 'Dev';
-  if (!isProductCategory(category)) {
-    throw validationError(`Categoria inválida. Use um destes valores: ${PRODUCT_CATEGORIES.join(', ')}.`);
-  }
+  const categories = toUniqueStringArray(input?.categories).length
+    ? toUniqueStringArray(input?.categories)
+    : toUniqueStringArray(existingProduct?.categories).length
+      ? toUniqueStringArray(existingProduct?.categories)
+      : [];
+  const categoryIds = toUniqueStringArray(input?.categoryIds).length
+    ? toUniqueStringArray(input?.categoryIds)
+    : toUniqueStringArray(existingProduct?.categoryIds);
+  const category = String(input?.category ?? existingProduct?.category ?? categories[0] ?? '').trim();
+  const productCategories = categories.length ? categories : category ? [category] : [];
 
   const status = input?.status ?? existingProduct?.status ?? 'draft';
   if (!isProductStatus(status)) {
@@ -171,7 +177,9 @@ export function normalizeProduct(
     id: String(existingProduct?.id ?? input?.id ?? generateId()),
     name,
     slug,
-    category,
+    category: productCategories[0] || category,
+    categoryIds,
+    categories: productCategories,
     price,
     compareAtPrice,
     cost,
@@ -181,6 +189,9 @@ export function normalizeProduct(
     sizes: toStringArray(input?.sizes).length ? toStringArray(input?.sizes) : ['P', 'M', 'G'],
     genders: toStringArray(input?.genders).length ? toStringArray(input?.genders) : ['Masculino', 'Feminino'],
     image: String(input?.image ?? '').trim() || DEFAULT_IMAGE,
+    imageBack: String(input?.imageBack ?? existingProduct?.imageBack ?? '').trim(),
+    imageFemale: String(input?.imageFemale ?? existingProduct?.imageFemale ?? '').trim(),
+    imageBackFemale: String(input?.imageBackFemale ?? existingProduct?.imageBackFemale ?? '').trim(),
     description: String(input?.description ?? '').trim(),
     tags: toStringArray(input?.tags),
     rating,
@@ -263,10 +274,6 @@ function readNonNegativeInteger(value: unknown, field: string, fallback: number)
   }
 
   return number;
-}
-
-function isProductCategory(value: unknown): value is ProductCategory {
-  return PRODUCT_CATEGORIES.includes(value as ProductCategory);
 }
 
 function isProductStatus(value: unknown): value is ProductStatus {
