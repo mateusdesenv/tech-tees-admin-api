@@ -88,6 +88,8 @@ MONGODB_USERS_COLLECTION=users
 MONGODB_STORES_COLLECTION=stores
 AUTH_SECRET=gere-um-segredo-forte-aqui
 MERCADO_PAGO_ACCESS_TOKEN=APP_USR-ou-TEST-...
+MERCADO_PAGO_WEBHOOK_URL=https://hml.api.techtees.online/webhooks/mercado-pago
+PUBLIC_API_BASE_URL=https://hml.api.techtees.online
 API_BASE_URL=https://sua-api.vercel.app
 APP_BASE_URL=https://sua-api.vercel.app
 ECOMMERCE_BASE_URL=https://sua-loja.vercel.app
@@ -142,6 +144,40 @@ MAX_IMPORT_PRODUCTS=1000
 - `DELETE /products/:id`
 - `POST /products/:id/duplicate`
 - `PATCH /products/:id/status`
+
+### Webhook Mercado Pago
+
+Em HML, configure o webhook do Mercado Pago para apontar para a API, não para o frontend:
+
+```txt
+https://hml.api.techtees.online/webhooks/mercado-pago
+```
+
+Também configure na Vercel da API:
+
+```txt
+MERCADO_PAGO_WEBHOOK_URL=https://hml.api.techtees.online/webhooks/mercado-pago
+PUBLIC_API_BASE_URL=https://hml.api.techtees.online
+```
+
+`APP_BASE_URL` e `API_BASE_URL`, quando usados para notificação, devem apontar para a API. O domínio do frontend `https://hml.techtees.online` não deve ser usado como webhook.
+
+Teste manual:
+
+```bash
+curl -i -X POST 'https://hml.api.techtees.online/webhooks/mercado-pago' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "action": "payment.created",
+    "api_version": "v1",
+    "data": {
+      "id": "1347262373"
+    },
+    "type": "payment"
+  }'
+```
+
+O esperado é HTTP `200` com `{"received":true}`. Se o Mercado Pago mostrar `404`, a URL configurada provavelmente está apontando para o frontend ou para um domínio de API incorreto.
 
 ## Segurança aplicada nesta versão
 

@@ -494,13 +494,30 @@ async function handleCheckoutRoutes(request, response, segments) {
 async function handleMercadoPagoWebhook(request, url) {
   const payload = await readJson(request);
   const paymentId = payload?.data?.id || payload?.id || url.searchParams.get('data.id') || url.searchParams.get('id');
-  const eventType = payload?.type || payload?.topic || url.searchParams.get('type') || url.searchParams.get('topic');
+  const eventType = payload?.type || payload?.topic || payload?.action || url.searchParams.get('type') || url.searchParams.get('topic');
+
+  console.info('Mercado Pago webhook received', {
+    action: payload?.action,
+    type: payload?.type,
+    topic: payload?.topic,
+    paymentId: paymentId ? String(paymentId) : '',
+  });
 
   if (!paymentId || !String(eventType || '').includes('payment')) {
+    console.info('Mercado Pago webhook ignored', {
+      reason: 'missing payment event',
+      eventType,
+      paymentId: paymentId ? String(paymentId) : '',
+    });
     return;
   }
 
   const payment = await fetchMercadoPagoPayment(paymentId);
+  console.info('Mercado Pago payment fetched', {
+    paymentId: String(payment.id || paymentId),
+    status: payment.status,
+    externalReference: payment.external_reference || payment.metadata?.order_id || '',
+  });
 
   const metadata = payment.metadata || {};
   const metadataItems = normalizePaymentMetadataItems(metadata.items);
@@ -520,6 +537,24 @@ async function handleMercadoPagoWebhook(request, url) {
 
   if (payment.status === 'approved') {
     await registerApprovedCheckout(items, orderPayload);
+    console.info('Mercado Pago webhook approved order processed', {
+      paymentId: String(payment.id || paymentId),
+      externalReference: orderPayload.externalReference || '',
+    });
+    return;
+  }
+
+  if (['pending', 'in_process'].includes(String(payment.status || '').toLowerCase())) {
+    await updateCheckoutOrderPaymentStatus({
+      ...orderPayload,
+      paymentStatus: payment.status,
+      orderStatus: 'awaiting_payment',
+    });
+    console.info('Mercado Pago webhook pending order updated', {
+      paymentId: String(payment.id || paymentId),
+      externalReference: orderPayload.externalReference || '',
+      status: payment.status,
+    });
     return;
   }
 
@@ -527,6 +562,11 @@ async function handleMercadoPagoWebhook(request, url) {
     await updateCheckoutOrderPaymentStatus({
       ...orderPayload,
       paymentStatus: payment.status,
+    });
+    console.info('Mercado Pago webhook rejected/cancelled order updated', {
+      paymentId: String(payment.id || paymentId),
+      externalReference: orderPayload.externalReference || '',
+      status: payment.status,
     });
   }
 }
@@ -1004,7 +1044,23 @@ function createCheckoutBackUrls(baseUrl) {
 }
 
 function createMercadoPagoNotificationUrl(baseUrl) {
-  const normalizedBaseUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
+  const explicitWebhookUrl = String(process.env.MERCADO_PAGO_WEBHOOK_URL || '').trim();
+
+  if (explicitWebhookUrl) {
+    if (!isPublicHttpUrl(explicitWebhookUrl)) {
+      throw new HttpError('MERCADO_PAGO_WEBHOOK_URL precisa ser uma URL pública válida.', 503);
+    }
+
+    return explicitWebhookUrl;
+  }
+
+  const normalizedBaseUrl = String(
+    process.env.PUBLIC_API_BASE_URL
+    || process.env.API_BASE_URL
+    || process.env.APP_BASE_URL
+    || baseUrl
+    || '',
+  ).trim().replace(/\/+$/, '');
 
   if (!normalizedBaseUrl) {
     return undefined;
@@ -1015,10 +1071,27 @@ function createMercadoPagoNotificationUrl(baseUrl) {
   try {
     notificationUrl = new URL('/webhooks/mercado-pago', normalizedBaseUrl).toString();
   } catch {
-    throw new HttpError('APP_BASE_URL/API_BASE_URL precisa ser uma URL absoluta válida.', 503);
+    throw new HttpError('PUBLIC_API_BASE_URL/API_BASE_URL/APP_BASE_URL precisa ser uma URL absoluta válida.', 503);
+  }
+
+  if (isKnownFrontendWebhookUrl(notificationUrl)) {
+    throw new HttpError('A notification_url do Mercado Pago está apontando para o frontend. Configure PUBLIC_API_BASE_URL ou MERCADO_PAGO_WEBHOOK_URL com a URL pública da API.', 503);
   }
 
   return isPublicHttpUrl(notificationUrl) ? notificationUrl : undefined;
+}
+
+function isKnownFrontendWebhookUrl(value) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return [
+      'hml.techtees.online',
+      'techtees.online',
+      'www.techtees.online',
+    ].includes(hostname);
+  } catch {
+    return false;
+  }
 }
 
 function isPublicHttpUrl(value) {
@@ -1299,33 +1372,16 @@ async function createMercadoPagoPixPayment(payload = {}) {
   await updateCheckoutOrderPaymentStatus({
     externalReference,
     paymentId: responseBody.id,
-    paymentStatus: responseBody.status || 'pending',
-    orderStatus: responseBody.status === 'approved' ? 'paid' : 'awaiting_payment',
+    paymentStatus: 'pending',
+    orderStatus: 'awaiting_payment',
     paymentMethodId: responseBody.payment_method_id || 'pix',
     pix,
   });
 
-  if (responseBody.status === 'approved') {
-    await registerApprovedCheckout(normalizedItems, {
-      externalReference,
-      paymentId: responseBody.id,
-      paymentStatus: responseBody.status,
-      paymentMethodId: responseBody.payment_method_id || 'pix',
-      buyerName,
-      payerEmail: pixData.payerEmail,
-      shippingAddress: pixData.shippingAddress,
-      shippingCost,
-      totalAmount: transactionAmount,
-      storeId: payload.storeId,
-      firebaseUid: payload.customer?.firebaseUid,
-      customerEmail: payload.customer?.email,
-    });
-  }
-
   return {
     paymentId: responseBody.id,
     id: responseBody.id,
-    status: responseBody.status,
+    status: 'pending',
     statusDetail: responseBody.status_detail,
     externalReference,
     paymentMethodId: responseBody.payment_method_id || 'pix',
@@ -1412,7 +1468,7 @@ async function registerApprovedCheckout(items, orderInput = {}) {
   const externalReference = String(orderInput.externalReference || generateId());
   const existingOrder = await orders.findOne({ externalReference }, { projection: { _id: 0 } });
 
-  if (existingOrder?.paymentStatus === 'approved') {
+  if (existingOrder?.paymentStatus === 'approved' || existingOrder?.stockDeductedAt) {
     return;
   }
 
@@ -1488,6 +1544,7 @@ async function registerApprovedCheckout(items, orderInput = {}) {
     })),
     shippingAddress: orderInput.shippingAddress || existingOrder?.shippingAddress || null,
     pix: orderInput.pix || existingOrder?.pix || null,
+    stockDeductedAt: existingOrder?.stockDeductedAt || now,
     createdAt: existingOrder?.createdAt || now,
     updatedAt: now,
   };
