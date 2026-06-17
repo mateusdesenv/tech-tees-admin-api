@@ -1042,9 +1042,9 @@ function isPublicHttpUrl(value) {
 function normalizeMercadoPagoError(responseBody = {}) {
   const cause = Array.isArray(responseBody.cause)
     ? responseBody.cause.map((item) => ({
-        code: item?.code,
-        description: item?.description,
-      }))
+      code: item?.code,
+      description: item?.description,
+    }))
     : [];
 
   return {
@@ -1419,14 +1419,14 @@ async function registerApprovedCheckout(items, orderInput = {}) {
   const orderItems = saleItems.length > 0
     ? saleItems
     : (existingOrder?.items || []).map((item) => ({
-        id: item.productId,
-        title: item.title,
-        quantity: item.quantity,
-        unit_price: item.unitPrice,
-        selectedColor: item.selectedColor,
-        selectedSize: item.selectedSize,
-        selectedGender: item.selectedGender,
-      }));
+      id: item.productId,
+      title: item.title,
+      quantity: item.quantity,
+      unit_price: item.unitPrice,
+      selectedColor: item.selectedColor,
+      selectedSize: item.selectedSize,
+      selectedGender: item.selectedGender,
+    }));
 
   if (orderItems.length === 0) {
     console.warn('Approved checkout without order items', { externalReference });
@@ -1520,8 +1520,6 @@ async function upsertCheckoutOrderDraft(items, orderInput = {}) {
       $setOnInsert: {
         id: generateId(),
         externalReference: String(orderInput.externalReference),
-        paymentStatus: String(orderInput.paymentStatus || 'created'),
-        orderStatus: String(orderInput.orderStatus || 'awaiting_payment'),
         createdAt: now,
       },
       $set: {
@@ -1617,9 +1615,9 @@ async function normalizeMercadoPagoPaymentFormData(formData = {}) {
   const token = String(formData.token || '').trim();
   const paymentMethodId = String(
     formData.payment_method_id
-      || formData.paymentMethodId
-      || cardTokenData?.paymentMethodId
-      || '',
+    || formData.paymentMethodId
+    || cardTokenData?.paymentMethodId
+    || '',
   ).trim();
   const issuerId = String(formData.issuer_id || formData.issuerId || cardTokenData?.issuerId || '').trim();
   const installments = Math.max(1, Math.floor(toNumber(formData.installments, 1)));
@@ -2121,14 +2119,14 @@ async function attachCatalogColors(products) {
     const sourceVariations = Array.isArray(product.colors) && product.colors.length > 0
       ? product.colors
       : [{
-          id: product.id,
-          color: product.color,
-          colorId: product.colorId,
-          colorHex: product.colorHex,
-          colorRgb: product.colorRgb,
-          image: product.image,
-          imageBack: product.imageBack,
-        }];
+        id: product.id,
+        color: product.color,
+        colorId: product.colorId,
+        colorHex: product.colorHex,
+        colorRgb: product.colorRgb,
+        image: product.image,
+        imageBack: product.imageBack,
+      }];
     const colors = sourceVariations.map((variation) => {
       const catalogColor = variation.colorId
         ? catalogColors.find((color) => color.id === variation.colorId)
@@ -2136,12 +2134,12 @@ async function attachCatalogColors(products) {
 
       return catalogColor
         ? {
-            ...variation,
-            color: catalogColor.name,
-            colorId: catalogColor.id,
-            colorHex: catalogColor.hex,
-            colorRgb: catalogColor.rgb,
-          }
+          ...variation,
+          color: catalogColor.name,
+          colorId: catalogColor.id,
+          colorHex: catalogColor.hex,
+          colorRgb: catalogColor.rgb,
+        }
         : variation;
     });
     const primaryColor = colors[0];
