@@ -475,6 +475,19 @@ async function handleCheckoutRoutes(request, response, segments) {
     return sendJson(response, 201, payment);
   }
 
+  if (segments.length === 2 && segments[1] === 'create-pix-payment' && request.method === 'POST') {
+    const payload = await readJson(request);
+    const firebaseUser = await verifyFirebaseIdToken(getBearerToken(request));
+    const payment = await createMercadoPagoPixPayment({
+      ...payload,
+      customer: {
+        firebaseUid: String(firebaseUser.localId || ''),
+        email: normalizeEmail(firebaseUser.email),
+      },
+    });
+    return sendJson(response, 201, payment);
+  }
+
   return sendJson(response, 404, { error: 'Rota não encontrada.' });
 }
 
@@ -489,24 +502,33 @@ async function handleMercadoPagoWebhook(request, url) {
 
   const payment = await fetchMercadoPagoPayment(paymentId);
 
-  if (payment.status !== 'approved') {
-    return;
-  }
-
   const metadata = payment.metadata || {};
   const metadataItems = normalizePaymentMetadataItems(metadata.items);
   const items = metadataItems.map(normalizeCheckoutItem);
 
-  await registerApprovedCheckout(items, {
+  const orderPayload = {
     externalReference: payment.external_reference || metadata.order_id,
     paymentId: payment.id,
     paymentStatus: payment.status,
+    paymentMethodId: payment.payment_method_id,
     buyerName: metadata.buyer_name || payment.card?.cardholder?.name,
     payerEmail: payment.payer?.email,
     shippingCost: metadata.shipping_cost,
     totalAmount: payment.transaction_amount,
     storeId: metadata.store_id,
-  });
+  };
+
+  if (payment.status === 'approved') {
+    await registerApprovedCheckout(items, orderPayload);
+    return;
+  }
+
+  if (['rejected', 'cancelled', 'canceled', 'expired'].includes(String(payment.status || '').toLowerCase())) {
+    await updateCheckoutOrderPaymentStatus({
+      ...orderPayload,
+      paymentStatus: payment.status,
+    });
+  }
 }
 
 async function fetchMercadoPagoPayment(paymentId) {
@@ -1155,6 +1177,7 @@ async function createMercadoPagoPayment(payload = {}) {
       externalReference,
       paymentId: responseBody.id,
       paymentStatus: responseBody.status,
+      paymentMethodId: responseBody.payment_method_id,
       buyerName,
       payerEmail: formData.payerEmail,
       shippingAddress: formData.shippingAddress,
@@ -1172,6 +1195,141 @@ async function createMercadoPagoPayment(payload = {}) {
     statusDetail: responseBody.status_detail,
     paymentMethodId: responseBody.payment_method_id,
     externalReference,
+  };
+}
+
+async function createMercadoPagoPixPayment(payload = {}) {
+  const accessToken = String(process.env.MERCADO_PAGO_ACCESS_TOKEN || '').trim();
+
+  if (!accessToken) {
+    throw new HttpError('MERCADO_PAGO_ACCESS_TOKEN não configurado.', 503);
+  }
+
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const normalizedItems = items.map(normalizeCheckoutItem);
+
+  if (normalizedItems.length === 0) {
+    throw new HttpError('O carrinho está vazio.', 400);
+  }
+
+  validateCheckoutSelections(normalizedItems);
+  await validateCheckoutInventory(normalizedItems);
+
+  const shippingCost = toNumber(payload.shipping ?? payload.shippingCost, 0);
+  const transactionAmount = calculateCheckoutAmount(normalizedItems, shippingCost);
+  const pixData = normalizeMercadoPagoPixData(payload.payment || payload.formData || {});
+  const externalReference = payload.orderId || generateId();
+  const buyerName = pixData.fullName;
+  const appBaseUrl = String(process.env.APP_BASE_URL || process.env.API_BASE_URL || '').replace(/\/+$/, '');
+  const notificationUrl = createMercadoPagoNotificationUrl(appBaseUrl);
+  const nameParts = splitFullName(buyerName);
+  const paymentMetadata = removeUndefinedValues({
+    order_id: externalReference,
+    store_id: payload.storeId,
+    buyer_name: buyerName,
+    shipping_cost: shippingCost,
+  });
+
+  await upsertCheckoutOrderDraft(normalizedItems, {
+    externalReference,
+    buyerName,
+    payerEmail: pixData.payerEmail,
+    shippingAddress: pixData.shippingAddress,
+    shippingCost,
+    totalAmount: transactionAmount,
+    storeId: payload.storeId,
+    firebaseUid: payload.customer?.firebaseUid,
+    customerEmail: payload.customer?.email,
+    paymentMethodId: 'pix',
+    paymentStatus: 'created',
+    orderStatus: 'awaiting_payment',
+  });
+
+  const paymentPayload = removeUndefinedValues({
+    payment_method_id: 'pix',
+    transaction_amount: transactionAmount,
+    description: `Tech Tees - pedido ${externalReference}`,
+    external_reference: externalReference,
+    notification_url: notificationUrl,
+    metadata: paymentMetadata,
+    payer: {
+      email: pixData.payerEmail,
+      first_name: nameParts.firstName,
+      last_name: nameParts.lastName,
+      identification: pixData.identification,
+    },
+  });
+
+  const mercadoPagoResponse = await fetch('https://api.mercadopago.com/v1/payments', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'X-Idempotency-Key': randomUUID(),
+    },
+    body: JSON.stringify(paymentPayload),
+  });
+
+  const responseBody = await mercadoPagoResponse.json().catch(() => ({}));
+
+  if (!mercadoPagoResponse.ok) {
+    const mercadoPagoError = normalizeMercadoPagoError(responseBody);
+    console.error('Mercado Pago Pix payment error', {
+      status: mercadoPagoResponse.status,
+      error: mercadoPagoError.error,
+      message: mercadoPagoError.message,
+      statusDetail: responseBody.status_detail,
+      cause: mercadoPagoError.cause,
+      payment: {
+        transactionAmount: paymentPayload.transaction_amount,
+        paymentMethodId: paymentPayload.payment_method_id,
+        payerEmail: paymentPayload.payer?.email,
+        notificationUrlPresent: Boolean(paymentPayload.notification_url),
+      },
+    });
+
+    throw new HttpError(
+      createMercadoPagoErrorMessage(mercadoPagoResponse.status, mercadoPagoError),
+      mercadoPagoResponse.status,
+    );
+  }
+
+  const pix = normalizeMercadoPagoPixResponse(responseBody);
+
+  await updateCheckoutOrderPaymentStatus({
+    externalReference,
+    paymentId: responseBody.id,
+    paymentStatus: responseBody.status || 'pending',
+    orderStatus: responseBody.status === 'approved' ? 'paid' : 'awaiting_payment',
+    paymentMethodId: responseBody.payment_method_id || 'pix',
+    pix,
+  });
+
+  if (responseBody.status === 'approved') {
+    await registerApprovedCheckout(normalizedItems, {
+      externalReference,
+      paymentId: responseBody.id,
+      paymentStatus: responseBody.status,
+      paymentMethodId: responseBody.payment_method_id || 'pix',
+      buyerName,
+      payerEmail: pixData.payerEmail,
+      shippingAddress: pixData.shippingAddress,
+      shippingCost,
+      totalAmount: transactionAmount,
+      storeId: payload.storeId,
+      firebaseUid: payload.customer?.firebaseUid,
+      customerEmail: payload.customer?.email,
+    });
+  }
+
+  return {
+    paymentId: responseBody.id,
+    id: responseBody.id,
+    status: responseBody.status,
+    statusDetail: responseBody.status_detail,
+    externalReference,
+    paymentMethodId: responseBody.payment_method_id || 'pix',
+    pix,
   };
 }
 
@@ -1195,6 +1353,55 @@ async function validateCheckoutInventory(items) {
       }
     }),
   );
+}
+
+function normalizeMercadoPagoPixData(formData = {}) {
+  const payer = formData.payer || {};
+  const shippingAddress = formData.shippingAddress || null;
+  const fullName = String(formData.fullName || shippingAddress?.fullName || payer.name || '').trim();
+  const payerEmail = String(payer.email || formData.payer_email || formData.email || shippingAddress?.email || '').trim();
+  const identification = payer.identification || formData.identification || {};
+  const identificationType = String(identification.type || 'CPF').trim();
+  const identificationNumber = String(identification.number || shippingAddress?.cpf || formData.cpf || '').replace(/\D/g, '');
+
+  if (!fullName) {
+    throw new HttpError('Nome do pagador não informado.', 400);
+  }
+
+  if (!payerEmail) {
+    throw new HttpError('E-mail do pagador não informado.', 400);
+  }
+
+  if (!identificationType || !identificationNumber) {
+    throw new HttpError('Documento do pagador não informado.', 400);
+  }
+
+  return {
+    fullName,
+    payerEmail,
+    shippingAddress,
+    identification: {
+      type: identificationType,
+      number: identificationNumber,
+    },
+  };
+}
+
+function splitFullName(fullName) {
+  const parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  const firstName = parts.shift() || 'Cliente';
+  const lastName = parts.join(' ') || firstName;
+  return { firstName, lastName };
+}
+
+function normalizeMercadoPagoPixResponse(payment = {}) {
+  const transactionData = payment.point_of_interaction?.transaction_data || {};
+
+  return removeUndefinedValues({
+    qrCode: transactionData.qr_code,
+    qrCodeBase64: transactionData.qr_code_base64,
+    ticketUrl: transactionData.ticket_url,
+  });
 }
 
 async function registerApprovedCheckout(items, orderInput = {}) {
@@ -1258,6 +1465,8 @@ async function registerApprovedCheckout(items, orderInput = {}) {
     externalReference,
     paymentId: orderInput.paymentId ? String(orderInput.paymentId) : '',
     paymentStatus: String(orderInput.paymentStatus || 'approved'),
+    orderStatus: 'paid',
+    paymentMethodId: String(orderInput.paymentMethodId || existingOrder?.paymentMethodId || '').trim(),
     storeId,
     buyerName: String(orderInput.buyerName || existingOrder?.buyerName || '').trim() || 'Comprador não informado',
     payerEmail: String(orderInput.payerEmail || existingOrder?.payerEmail || '').trim(),
@@ -1278,6 +1487,7 @@ async function registerApprovedCheckout(items, orderInput = {}) {
       selectedGender: item.selectedGender || null,
     })),
     shippingAddress: orderInput.shippingAddress || existingOrder?.shippingAddress || null,
+    pix: orderInput.pix || existingOrder?.pix || null,
     createdAt: existingOrder?.createdAt || now,
     updatedAt: now,
   };
@@ -1310,10 +1520,14 @@ async function upsertCheckoutOrderDraft(items, orderInput = {}) {
       $setOnInsert: {
         id: generateId(),
         externalReference: String(orderInput.externalReference),
-        paymentStatus: 'created',
+        paymentStatus: String(orderInput.paymentStatus || 'created'),
+        orderStatus: String(orderInput.orderStatus || 'awaiting_payment'),
         createdAt: now,
       },
       $set: {
+        paymentStatus: String(orderInput.paymentStatus || 'created'),
+        orderStatus: String(orderInput.orderStatus || 'awaiting_payment'),
+        paymentMethodId: String(orderInput.paymentMethodId || '').trim(),
         storeId,
         buyerName: String(orderInput.buyerName || '').trim() || 'Comprador não informado',
         payerEmail: String(orderInput.payerEmail || '').trim(),
@@ -1334,11 +1548,54 @@ async function upsertCheckoutOrderDraft(items, orderInput = {}) {
           selectedGender: item.selectedGender || null,
         })),
         shippingAddress: orderInput.shippingAddress || null,
+        pix: orderInput.pix || null,
         updatedAt: now,
       },
     },
     { upsert: true },
   );
+}
+
+async function updateCheckoutOrderPaymentStatus(orderInput = {}) {
+  const orders = await getOrdersCollection();
+  const externalReference = String(orderInput.externalReference || '').trim();
+  const paymentId = orderInput.paymentId ? String(orderInput.paymentId) : '';
+
+  if (!externalReference && !paymentId) {
+    return;
+  }
+
+  const paymentStatus = normalizePaymentStatus(orderInput.paymentStatus);
+  const orderStatus = orderInput.orderStatus || paymentStatusToOrderStatus(paymentStatus);
+  const query = externalReference ? { externalReference } : { paymentId };
+
+  await orders.updateOne(query, {
+    $set: removeUndefinedValues({
+      paymentId,
+      paymentStatus,
+      orderStatus,
+      paymentMethodId: orderInput.paymentMethodId,
+      pix: orderInput.pix,
+      updatedAt: new Date().toISOString(),
+    }),
+  });
+}
+
+function normalizePaymentStatus(status) {
+  const value = String(status || '').toLowerCase();
+
+  if (value === 'approved') return 'approved';
+  if (value === 'rejected') return 'rejected';
+  if (value === 'cancelled' || value === 'canceled') return 'cancelled';
+  if (value === 'expired') return 'expired';
+  if (value === 'in_process' || value === 'pending') return 'pending';
+  return value || 'pending';
+}
+
+function paymentStatusToOrderStatus(status) {
+  if (status === 'approved') return 'paid';
+  if (['rejected', 'cancelled', 'expired'].includes(status)) return 'cancelled';
+  return 'awaiting_payment';
 }
 
 function calculateCheckoutAmount(items, shippingCost = 0) {
